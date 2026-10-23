@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# QEMU wrapper that makes the guest migratable, so its state can be saved and restored (see ../README.md).
+# QEMU refuses to save a guest that has a read-write vvfat disk or a virtio-sound device.
+#   REAL_QEMU           the real binary (required)
+#   HACKIOS_MIGRATABLE  1: read-only ESP, no sound device
+#   HACKIOS_INCOMING    a QEMU -incoming URI to restore from, e.g. "exec:gzip -dc state.gz"
+: "${REAL_QEMU:?REAL_QEMU is not set}"
+if [ "$1" = "-device" ] && [ "$2" = "help" ]; then
+	if [ -n "$HACKIOS_MIGRATABLE" ]; then "$REAL_QEMU" "$@" | grep -v virtio-sound-device; else "$REAL_QEMU" "$@"; fi
+	exit 0
+fi
+args=()
+while [ $# -gt 0 ]; do
+	if [ -n "$HACKIOS_MIGRATABLE" ]; then
+		case "$1" in
+		-device) case "$2" in virtio-sound-device*) shift 2; continue;; esac;;
+		-audiodev) shift 2; continue;;
+		-drive) case "$2" in *fat:rw:esp*) args+=("$1" "${2/fat:rw:esp/fat:esp},readonly=on"); shift 2; continue;; esac;;
+		esac
+	fi
+	args+=("$1"); shift
+done
+[ -n "$HACKIOS_INCOMING" ] && args+=(-incoming "$HACKIOS_INCOMING")
+exec "$REAL_QEMU" "${args[@]}"
