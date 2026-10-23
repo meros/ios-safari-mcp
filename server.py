@@ -112,7 +112,9 @@ def snap_path(name):
 def tool_vm_start(args):
     if qemu_alive():
         return text_result('QEMU is already running. Call vm_stop first for a fresh boot.\n' + json.dumps(status()))
-    seconds = int(args.get('seconds', 1200))
+    # The guest gets loader_return_after=SECONDS and hands control back to the loader after that much guest time since
+    # boot. A saved state keeps the clock, so a short value makes every snapshot die soon after it is restored.
+    seconds = int(args.get('seconds', 28800))
     env = dict(os.environ, HACKIOS_DIR=HACKIOS, HACKIOS_MCP_STATE=STATE, RUN_SECONDS=str(seconds))
     snapshot = args.get('snapshot')
     if snapshot:
@@ -496,6 +498,28 @@ def tool_settle(args):
     return text_result(json.dumps(r), error=r.get('reason') == 'QEMU is not running')
 
 
+def tool_guest_process(args):
+    """Is a process running in the guest? The kernel prints the threads of a named process into the console log
+    (`ustacks: NAME[pid] N threads ...` or `ustacks: no process called NAME`); this asks and reads the answer."""
+    name = args['name']
+    if not re.fullmatch(r'[A-Za-z0-9_.+-]{1,40}', name):
+        return text_result('name: letters, digits and _ . + - only', error=True)
+    before = len(log_text())
+    ok, out = touch('stacks', name)
+    if not ok:
+        return text_result(out, error=True)
+    deadline = time.time() + float(args.get('timeout', 20))
+    while time.time() < deadline:
+        new = log_text()[before:]
+        m = re.search(r'ustacks: (no process called %s|%s\[(\d+)\] (\d+) threads[^\n]*)' % (re.escape(name), re.escape(name)), new)
+        if m:
+            if m.group(2) is None:
+                return text_result(json.dumps({'running': False, 'name': name}))
+            return text_result(json.dumps({'running': True, 'name': name, 'pid': int(m.group(2)), 'threads': int(m.group(3))}))
+        time.sleep(1)
+    return text_result(f'no answer for {name} in the log (is the VM running and the log current?)', error=True)
+
+
 def tool_wake(args):
     """The guest turns the display off after boot. A tap and then the home key woke it in testing."""
     touch('tap', 0.5, 0.5)
@@ -582,7 +606,7 @@ SETTLE_PROPS = {'settle': {'type': 'boolean', 'description': 'wait for the scree
 
 TOOLS = {
     'vm_start': (tool_vm_start, 'Boot HackiOS in QEMU in the background. Takes about 10 minutes under software emulation.',
-                 {'seconds': {'type': 'integer', 'description': 'session length, default 1200'},
+                 {'seconds': {'type': 'integer', 'description': 'session length in guest seconds, default 28800 (8 h); a snapshot cannot live longer than this minus its age when saved'},
                   'cpus': {'type': 'integer', 'description': 'guest CPUs, default 4'},
                   'spinlock_timeout_us': {'type': 'integer', 'description': 'kernel spinlock timeout, default 60000000'},
                   'snapshot': {'type': 'string', 'description': 'restore this snapshot instead of booting'},
@@ -621,6 +645,8 @@ TOOLS = {
                  {'url': {'type': 'string'}, 'delay_s': {'type': 'number'}}, ['url']),
     'settle': (tool_settle, 'Wait until the screen stops changing (two frames equal for stable_for seconds) or the timeout ends.',
                {'timeout': {'type': 'number'}, 'stable_for': {'type': 'number'}}, []),
+    'guest_process': (tool_guest_process, 'Is a process running in the guest (by name, e.g. MobileSafari, webinspectord)? Returns pid and thread count.',
+                      {'name': {'type': 'string'}, 'timeout': {'type': 'number'}}, ['name']),
     'wake': (acting(tool_wake), 'Wake the display (it turns off after boot): a tap and then the home key.', {}, []),
     'wait': (tool_wait, 'Sleep up to 60 s (the guest is slow; animations take time).', {'seconds': {'type': 'number'}}, []),
     'log_tail': (tool_log_tail, 'Last lines of the guest console log, optionally filtered by a regex.',

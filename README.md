@@ -28,6 +28,7 @@ RC_JOBS=$PWD/rc.jobs.mcp common/build.sh qemu-virt     # in the hackios tree, in
 | `tap`, `tap_px`, `hold`, `swipe`, `key`, `scroll`, `back`, `home_screen`, `wake` | input; positions are fractions of the screen, `tap_px` takes pixels of a screenshot |
 | `type_text`, `open_url` | type on the on-screen keyboard; open an address in Safari |
 | `settle` | wait for the screen to change and then to stop changing |
+| `guest_process` | is a process running in the guest (by name), with pid and thread count |
 | `log_tail`, `wait`, `vm_stop` | guest console lines by regex, a pause, stop |
 
 Every input tool takes `settle: true`: it then returns only after the screen has changed and stopped changing
@@ -39,13 +40,30 @@ in software, so a screenshot right after a tap shows the old screen. The status 
 
 | What | Time |
 |---|---|
-| boot to SpringBoard | 10.7 to 14.4 minutes |
+| boot to SpringBoard | 8.9 minutes on the charger with turbo on and low load; 10.7 to 14.4 minutes on battery |
 | `vm_save` | 70 s, 2,879 MB |
 | `vm_start(snapshot=...)` to a running guest | 28 s |
 | `screenshot` | 0.22 s (was 2.1 s with fixed sleeps) |
 | tap on the screen to the result | 14 to 60 s |
 
 A restored guest answers input and its clock continues. The saved state includes the loaded page.
+
+## Session length and snapshots
+
+The guest gets `loader_return_after=SECONDS` and ends after that much guest time since boot (default 8 hours here). A saved
+state keeps that clock: a snapshot saved at 1,796 s of a 2,400 s session had 600 s left after every restore. Boot with the
+long default before you save.
+
+## Web Inspector: what is known
+
+- `webinspectord` is not running with Safari open (`guest_process webinspectord` says no), although its job is defined
+  once the `mkjobs.py` bug is fixed. Safari does not start it by itself.
+- The Web Inspector switch (Settings, Safari, Advanced) cannot be used: tapping Safari in Settings aborts the Settings app
+  (`Preferences[235] aborts`, SIGABRT). The switch is added in code, not in `Developer.plist`.
+- The dyld cache has the keys `RemoteInspectorEnabled`, `RemoteInspectionEnabled`, `AllowRemoteInspection`,
+  `DeveloperExtrasEnabled` and the notifications `com.apple.webinspectord.available` and `.automatic_inspection_enabled`.
+  Which preference domain holds them is not known; the cache stores strings in a pool, so no neighbouring string helps.
+- Even with the daemon running, the host needs `lockdownd` (denied by `mkjobs.py`), a port forward, pairing and a usbmuxd shim.
 
 ## What cannot be done (yet)
 
