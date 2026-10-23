@@ -9,6 +9,11 @@
  * daemon's Darwin notification com.apple.webinspectord.available, which this program posts, and again on every
  * com.apple.webinspectord.availability_check.
  *
+ * Control channel: a frame for peer 0xFFFFFFFF is a command for this program, not for a process. "open-url URL" asks
+ * SpringBoard to open the URL (SBSOpenSensitiveURLAndUnlock, as the parent repo's battery_test does; it needs the
+ * entitlement com.apple.springboard.opensensitiveurl, see guest/wi_relay.entitlements), which starts Safari if it is not
+ * running and works when no web page exists. The answer comes back as a frame from peer 0xFFFFFFFF: "ok ..." or "error ...".
+ *
  * TCP side: one client at a time, frames of  u32 length (big endian) | u32 peer | data  where length counts
  * peer and data. From the guest the data is what a peer sent (peer = its number, from 1); a frame with no data says
  * that the peer is gone. To the guest, peer 0 means every peer; the data goes out as {"msgData": {"<UUID>": data}}
@@ -67,6 +72,14 @@ extern int atoi(const char *);
 extern void free(void *);
 extern void *memmem(const void *big, unsigned long big_len, const void *little, unsigned long little_len);
 extern void *memcpy(void *, const void *, unsigned long);
+extern void *dlopen(const char *path, int mode);
+extern void *dlsym(void *handle, const char *symbol);
+extern void dispatch_async(dispatch_queue_t queue, void (^block)(void));
+extern int strncmp(const char *, const char *, unsigned long);
+extern unsigned long strlen(const char *);
+typedef const void *CFURLRef;
+extern CFURLRef CFURLCreateWithBytes(const void *allocator, const uint8_t *bytes, long length, uint32_t encoding, CFURLRef base);
+extern void CFRelease(const void *object);
 extern void *malloc(unsigned long);
 extern int pthread_mutex_lock(void *);
 extern int pthread_mutex_unlock(void *);
@@ -74,6 +87,12 @@ extern int pthread_mutex_init(void *, const void *);
 extern uint32_t notify_post(const char *name);
 extern uint32_t notify_register_dispatch(const char *name, int *out_token, dispatch_queue_t queue, void (^handler)(int token));
 extern dispatch_queue_t dispatch_get_global_queue(long identifier, unsigned long flags);
+
+struct pollfd_ {
+	int fd;
+	short events, revents;
+};
+extern int poll(void *, unsigned, int);
 
 struct sockaddr_in_ {
 	uint8_t len, family;
@@ -93,6 +112,8 @@ static void strncpy_(char *dst, const char *src, unsigned long n)
 
 #define LOG(...) dprintf(1, "wi_relay: " __VA_ARGS__)
 #define MAX_PEERS 64
+#define CONTROL_PEER 0xFFFFFFFFu
+#define UTF8_ENCODING 0x08000100u   /* kCFStringEncodingUTF8 */
 
 /* pthread_mutex_t is 64 bytes on arm64 Darwin */
 static char lock[64] __attribute__((aligned(8)));
@@ -254,16 +275,69 @@ static void to_peers(uint32_t target, const void *data, size_t len)
 	pthread_mutex_unlock(&lock);
 }
 
-static int read_full(int fd, void *buf, size_t n)
+
+static void reply(const char *text)
 {
-	for (size_t off = 0; off < n;) {
-		long r = read(fd, (char *)buf + off, n - off);
-		if (r <= 0) {
-			return -1;
-		}
-		off += (size_t)r;
+	to_client(CONTROL_PEER, text, strlen(text));
+}
+
+/* "open-url URL": SpringBoard opens it in the default application (Safari for http and https) */
+static void open_url(const char *text)
+{
+	if (strncmp(text, "http://", 7) != 0 && strncmp(text, "https://", 8) != 0 && strncmp(text, "about:", 6) != 0) {
+		reply("error only http, https and about: addresses");
+		return;
 	}
-	return 0;
+	void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", 2 /* RTLD_NOW */);
+	int (*open)(CFURLRef, uint8_t) = sbs ? (int (*)(CFURLRef, uint8_t))dlsym(sbs, "SBSOpenSensitiveURLAndUnlock") : NULL;
+	CFURLRef url = CFURLCreateWithBytes(NULL, (const uint8_t *)text, (long)strlen(text), UTF8_ENCODING, NULL);
+	if (!open || !url) {
+		reply(open ? "error not a URL" : "error SBSOpenSensitiveURLAndUnlock is not available");
+		return;
+	}
+	int result = open(url, 1);
+	CFRelease(url);
+	LOG("SpringBoard was asked to open %s: %s\n", text, result ? "it does" : "it refuses");
+	reply(result ? "ok SpringBoard opens the address" : "error SpringBoard refuses (is the entitlement in the signature?)");
+}
+
+static void control(const char *data, size_t len)
+{
+	char *cmd = malloc(len + 1);
+	if (!cmd) {
+		return;
+	}
+	memcpy(cmd, data, len);
+	cmd[len] = 0;
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		if (strncmp(cmd, "open-url ", 9) == 0) {
+			open_url(cmd + 9);
+		} else {
+			reply("error unknown command");
+		}
+		free(cmd);
+	});
+}
+
+/* what each process listed last, so that a client need not wait for a page to change */
+static void replay_listings(void)
+{
+	pthread_mutex_lock(&lock);
+	for (int i = 0; i < npeers; i++) {
+		if (peers[i].listing) {
+			void *copy = malloc(peers[i].listing_len);
+			if (copy) {
+				memcpy(copy, peers[i].listing, peers[i].listing_len);
+				uint32_t pid = peers[i].id;
+				size_t plen = peers[i].listing_len;
+				pthread_mutex_unlock(&lock);
+				to_client(pid, copy, plen);
+				pthread_mutex_lock(&lock);
+				free(copy);
+			}
+		}
+	}
+	pthread_mutex_unlock(&lock);
 }
 
 int main(int argc, char **argv)
@@ -316,52 +390,83 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	LOG("listening on port %d\n", port);
+	/* One client at a time; a client that connects while another is attached replaces it (the old one is a host
+	 * process that died without closing, or an earlier run). */
+	uint8_t *buf = NULL;
+	size_t have = 0, want = 4;            /* bytes of the frame header or body read so far, and wanted */
+	int reading_body = 0;
 	for (;;) {
-		int fd = accept(ls, NULL, NULL);
-		if (fd < 0) {
+		struct pollfd_ p[2] = { { ls, 1, 0 }, { client_fd, 1, 0 } };
+		if (poll(p, client_fd >= 0 ? 2 : 1, -1) < 0) {
 			continue;
 		}
-		LOG("client connected\n");
-		client_fd = fd;
-		/* what each process listed last, so that the client need not wait for a page to change */
-		pthread_mutex_lock(&lock);
-		for (int i = 0; i < npeers; i++) {
-			if (peers[i].listing) {
-				void *copy = malloc(peers[i].listing_len);
-				if (copy) {
-					memcpy(copy, peers[i].listing, peers[i].listing_len);
-					uint32_t pid = peers[i].id;
-					size_t plen = peers[i].listing_len;
-					pthread_mutex_unlock(&lock);
-					to_client(pid, copy, plen);
-					pthread_mutex_lock(&lock);
-					free(copy);
+		if (p[0].revents & 1) {
+			int fd = accept(ls, NULL, NULL);
+			if (fd >= 0) {
+				if (client_fd >= 0) {
+					LOG("a new client replaces the old one\n");
+					close(client_fd);
 				}
-			}
-		}
-		pthread_mutex_unlock(&lock);
-		for (;;) {
-			uint8_t head[4];
-			if (read_full(fd, head, 4) != 0) {
-				break;
-			}
-			size_t len = ((size_t)head[0] << 24) | ((size_t)head[1] << 16) | ((size_t)head[2] << 8) | head[3];
-			if (len < 4 || len > (16u << 20)) {
-				break;
-			}
-			void *buf = malloc(len);
-			if (!buf || read_full(fd, buf, len) != 0) {
+				LOG("client connected\n");
 				free(buf);
-				break;
+				buf = NULL;
+				have = 0;
+				want = 4;
+				reading_body = 0;
+				client_fd = fd;
+				replay_listings();
+			}
+			continue;
+		}
+		if (client_fd >= 0 && (p[1].revents & (1 | 8 | 16))) {
+			if (!buf) {
+				buf = malloc(want < 4 ? 4 : want);
+			}
+			long r = read(client_fd, buf + have, want - have);
+			if (r <= 0) {
+				LOG("client done\n");
+				close(client_fd);
+				client_fd = -1;
+				free(buf);
+				buf = NULL;
+				have = 0;
+				want = 4;
+				reading_body = 0;
+				continue;
+			}
+			have += (size_t)r;
+			if (have < want) {
+				continue;
+			}
+			if (!reading_body) {
+				size_t len = ((size_t)buf[0] << 24) | ((size_t)buf[1] << 16) | ((size_t)buf[2] << 8) | buf[3];
+				free(buf);
+				buf = NULL;
+				if (len < 4 || len > (16u << 20)) {
+					LOG("bad frame length %zu\n", len);
+					close(client_fd);
+					client_fd = -1;
+					have = 0;
+					want = 4;
+					continue;
+				}
+				want = len;
+				have = 0;
+				reading_body = 1;
+				continue;
 			}
 			const uint8_t *f = buf;
 			uint32_t target = ((uint32_t)f[0] << 24) | ((uint32_t)f[1] << 16) | ((uint32_t)f[2] << 8) | f[3];
-			LOG("client sent %zu bytes for peer %u\n", len - 4, target);
-			to_peers(target, f + 4, len - 4);
+			if (target == CONTROL_PEER) {
+				control((const char *)f + 4, want - 4);
+			} else {
+				to_peers(target, f + 4, want - 4);
+			}
 			free(buf);
+			buf = NULL;
+			have = 0;
+			want = 4;
+			reading_body = 0;
 		}
-		client_fd = -1;
-		close(fd);
-		LOG("client done\n");
 	}
 }

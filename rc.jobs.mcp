@@ -1,7 +1,0 @@
-# Commands run by the launchd job com.redwood.demo (see userland/com.redwood.demo.plist) in the image the
-# hackios-safari-mcp server boots. Build with: RC_JOBS=<this file> common/build.sh qemu-virt
-# The default rc.jobs runs diagnostics (cpu_test 240 & burns CPU while SpringBoard starts) and never configures
-# the network, so Safari says "not connected to the Internet". This is rc.jobs.net's DHCP step on QEMU's virtio en0
-# (see userland/src/net_test.m) and a lookup. It needs the on-demand jobs (configd): see the RWA_PACKED16 fix in mkjobs.py.
-/redwood/bin/net_test show dhcp en0 waitaddr en0 90
-/redwood/bin/net_test resolve example.com reach example.com

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ios-safari-mcp"
+version = "0.2.0"
+description = "MCP server that drives iOS 16.5 Safari in QEMU on the HackiOS kernel: screenshots, touch, DOM, JavaScript, keyboard, console and network"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []          # the standard library only
+
+[project.scripts]
+ios-safari-mcp = "ios_safari_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 130
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "I"]
+ignore = ["E501", "SIM108", "B905", "UP015"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "E402"]
+"src/ios_safari_mcp/inspector/page.py" = ["E501"]
