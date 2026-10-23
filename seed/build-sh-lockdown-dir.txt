@@ -1,9 +1,0 @@
-Insert in userland/build.sh, directly above the line "(cd var && find . -type f | sed ..." (the var/ skeleton loop):
-
-	# the directory lockdownd keeps its settings in; the skeleton makes it before the files of var/ that go in it
-	[ -d var/root/Library/Lockdown ] && printf 'd\t755\t0\t0\t/private/var/root/Library/Lockdown\n' >> root/etc/var.skel
-
-Then copy seed/var/root/Library/Lockdown/data_ark.plist to userland/var/root/Library/Lockdown/ and build with
-JOBS="<the default list> com.apple.mobile.lockdown" (a job that is named keeps its Sockets and RunAtLoad; the on-demand
-jobs lose them) and, to get lockdownd's os_log lines on the console, OSLOG="com.apple.mobile.lockdown".
-Start the VM with HACKIOS_HOSTFWD=tcp:127.0.0.1:62078-:62078 (bin/qemu-system-aarch64 adds it to QEMU's user network).

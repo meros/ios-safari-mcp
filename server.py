@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """MCP server (stdio, no dependencies) that drives HackiOS (iOS 16.5 on XNU) running under QEMU.
 
-The tools work on pixels and touches: boot the VM, take a screenshot, tap, swipe, press a button.
+The tools work on pixels and touches: boot the VM, take a screenshot, tap, swipe, press a button. The inspector tools
+(js, dom, navigate, console_messages, network_log, ...) talk to Safari's Web Inspector through guest/wi_relay.
 They wrap what the hackios-xnu-kernel tree already has: the QEMU monitor (screendump, port 4444 + 10n),
 QMP (input events, port 4445 + 10n, through qemu/touch.py) and the console log.
 
@@ -9,6 +10,7 @@ Environment:
   HACKIOS_DIR         the checked-out tree (default ~/git/personal/hackios)
   HACKIOS_MCP_STATE   where the log, pid file and screenshots go (default ~/.local/state/hackios-mcp)
   QEMU_INSTANCE       QEMU instance number (default 0)
+  WI_PORT             host port that QEMU forwards to the guest's Web Inspector relay (default 27753 + 10n)
 """
 import base64
 import json
@@ -22,10 +24,12 @@ import time
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 HACKIOS = os.environ.get('HACKIOS_DIR', os.path.expanduser('~/git/personal/hackios'))
 STATE = os.environ.get('HACKIOS_MCP_STATE', os.path.expanduser('~/.local/state/hackios-mcp'))
 INSTANCE = int(os.environ.get('QEMU_INSTANCE', '0'))
 HMP_PORT = 4444 + 10 * INSTANCE
+WI_PORT = int(os.environ.get('WI_PORT', 27753 + 10 * INSTANCE))   # host port forwarded to the guest's Web Inspector relay
 LOG = os.path.join(STATE, 'run.log')
 PIDFILE = os.path.join(STATE, 'run.pid')
 SHOTS = os.path.join('/tmp', f'hackios-mcp-{os.getuid()}')
@@ -604,6 +608,145 @@ SETTLE_PROPS = {'settle': {'type': 'boolean', 'description': 'wait for the scree
                 'timeout': {'type': 'number'}, 'stable_for': {'type': 'number'}, 'wait_change': {'type': 'number'}}
 
 
+# --- Web Inspector (guest/wi_relay, host/webinspector.py) --------------------------------------------------------------
+_inspector = None
+WI_STALE = os.path.join(STATE, 'wi-connections.json')
+
+
+def _stale_ids():
+    try:
+        return list(json.load(open(WI_STALE)))
+    except (OSError, ValueError):
+        return []
+
+
+def _save_ids(ids):
+    with open(WI_STALE, 'w') as f:
+        json.dump(ids, f)
+
+
+def inspector():
+    """The connection to the guest's relay, made on first use and again after it was lost."""
+    global _inspector
+    import webinspector
+    if _inspector is not None and _inspector.dead is None:
+        return _inspector
+    _inspector = None
+    try:
+        insp = webinspector.Inspector(WI_PORT, connect_timeout=15)
+    except OSError as e:
+        raise OSError(f'cannot reach the Web Inspector relay on 127.0.0.1:{WI_PORT} ({e}); is the VM running an image built '
+                      'with build-image.sh, and has the guest got its network?')
+    # a page takes one frontend at a time: end the connections that an earlier run left behind
+    for stale in _stale_ids():
+        insp.forget_connection(stale)
+    _save_ids([insp.connection_id])
+    _inspector = insp
+    return insp
+
+
+def _session(args):
+    insp = inspector()
+    index = args.get('page')
+    return insp.session(None if index is None else int(index), wait=float(args.get('wait', 60)))
+
+
+def json_result(value):
+    return text_result(json.dumps(value, ensure_ascii=False, indent=1, default=str))
+
+
+def tool_inspector_pages(args):
+    insp = inspector()
+    pages = insp.wait_for_pages(float(args.get('wait', 60)), kinds=None if args.get('all') else ('WIRTypeWebPage',))
+    return json_result([{'index': i, **p} for i, p in enumerate(pages)])
+
+
+def tool_js(args):
+    s = _session(args)
+    return json_result(s.evaluate(args['expression'], **({'awaitPromise': True} if args.get('await_promise') else {})))
+
+
+_DOM_JS = r"""(function(sel, what, limit) {
+  var out = [];
+  var els = document.querySelectorAll(sel);
+  for (var i = 0; i < els.length && i < limit; i++) {
+    var e = els[i], r = e.getBoundingClientRect(), item = {tag: e.tagName.toLowerCase()};
+    if (what === 'html') { item.html = e.outerHTML; }
+    else if (what === 'text') { item.text = e.innerText; }
+    else {
+      item.text = (e.innerText || e.value || '').slice(0, 200);
+      item.attrs = {}; for (var a = 0; a < e.attributes.length; a++) { item.attrs[e.attributes[a].name] = e.attributes[a].value; }
+      item.rect = {x: r.x, y: r.y, width: r.width, height: r.height};
+      item.visible = !!(r.width && r.height) && getComputedStyle(e).visibility !== 'hidden';
+    }
+    out.push(item);
+  }
+  return {count: els.length, items: out, viewport: {width: innerWidth, height: innerHeight, scrollX: scrollX, scrollY: scrollY}};
+})"""
+
+
+def tool_dom(args):
+    s = _session(args)
+    expr = f"{_DOM_JS}({json.dumps(args.get('selector', 'html'))}, {json.dumps(args.get('what', 'info'))}, {int(args.get('limit', 20))})"
+    return json_result(s.evaluate(expr))
+
+
+def tool_navigate(args):
+    s = _session(args)
+    s.send('Page.navigate', {'url': args['url']})
+    return text_result('navigating to ' + args['url'] + ' (use js or dom to see when it has loaded)')
+
+
+def tool_reload(args):
+    s = _session(args)
+    s.send('Page.reload', {'ignoreCache': bool(args.get('ignore_cache'))})
+    return text_result('reloading')
+
+
+def tool_console_messages(args):
+    s = _session(args)
+    out = [m['params']['message'] for m in list(s.events) if m.get('method') == 'Console.messageAdded']
+    if args.get('clear'):
+        s.events = type(s.events)((m for m in s.events if m.get('method') != 'Console.messageAdded'), maxlen=s.events.maxlen)
+    return json_result(out[-int(args.get('limit', 100)):])
+
+
+def tool_network_log(args):
+    s = _session(args)
+    requests = {}
+    for m in list(s.events):
+        method, p = m.get('method', ''), m.get('params', {})
+        if method == 'Network.requestWillBeSent':
+            requests[p['requestId']] = {'url': p['request']['url'], 'method': p['request']['method']}
+        elif method == 'Network.responseReceived' and p['requestId'] in requests:
+            r = p['response']
+            requests[p['requestId']].update(status=r.get('status'), mime=r.get('mimeType'), source=r.get('source'))
+        elif method == 'Network.loadingFailed' and p['requestId'] in requests:
+            requests[p['requestId']]['failed'] = p.get('errorText')
+    return json_result(list(requests.values())[-int(args.get('limit', 100)):])
+
+
+def tool_inspector_raw(args):
+    s = _session(args)
+    return json_result(s.send(args['method'], args.get('params') or {}, timeout=float(args.get('timeout', 60))))
+
+
+def tool_inspector_close(args):
+    global _inspector
+    if _inspector is not None:
+        try:
+            _inspector.close()
+        except OSError:
+            pass
+        _inspector = None
+    _save_ids([])
+    return text_result('closed')
+
+
+PAGE_PROP = {'page': {'type': 'integer', 'description': 'index in inspector_pages; default the first page with a real address'},
+             'wait': {'type': 'number', 'description': 'seconds to wait for the page list, default 60'}}
+
+
 TOOLS = {
     'vm_start': (tool_vm_start, 'Boot HackiOS in QEMU in the background. Takes about 10 minutes under software emulation.',
                  {'seconds': {'type': 'integer', 'description': 'session length in guest seconds, default 28800 (8 h); a snapshot cannot live longer than this minus its age when saved'},
@@ -647,6 +790,21 @@ TOOLS = {
                {'timeout': {'type': 'number'}, 'stable_for': {'type': 'number'}}, []),
     'guest_process': (tool_guest_process, 'Is a process running in the guest (by name, e.g. MobileSafari, webinspectord)? Returns pid and thread count.',
                       {'name': {'type': 'string'}, 'timeout': {'type': 'number'}}, ['name']),
+    'inspector_pages': (tool_inspector_pages, 'List the pages that Safari offers to the Web Inspector (title, url). Safari must be running with a page open.',
+                        {'all': {'type': 'boolean', 'description': 'also JavaScript contexts'}, 'wait': {'type': 'number'}}, []),
+    'js': (tool_js, 'Run a JavaScript expression in the page and return its value as JSON. Fast: no screenshot or typing.',
+           {'expression': {'type': 'string'}, 'await_promise': {'type': 'boolean'}, **PAGE_PROP}, ['expression']),
+    'dom': (tool_dom, 'Query the DOM by CSS selector. what=info (default: tag, text, attributes, rect in CSS px, visible), html (outerHTML) or text.',
+            {'selector': {'type': 'string'}, 'what': {'type': 'string', 'enum': ['info', 'html', 'text']}, 'limit': {'type': 'integer'}, **PAGE_PROP}, []),
+    'navigate': (tool_navigate, 'Load an address in the page through the inspector (no typing).', {'url': {'type': 'string'}, **PAGE_PROP}, ['url']),
+    'reload': (tool_reload, 'Reload the page.', {'ignore_cache': {'type': 'boolean'}, **PAGE_PROP}, []),
+    'console_messages': (tool_console_messages, 'Console messages of the page since the inspector attached (level, text, url).',
+                         {'limit': {'type': 'integer'}, 'clear': {'type': 'boolean'}, **PAGE_PROP}, []),
+    'network_log': (tool_network_log, 'Requests of the page since the inspector attached: url, method, status, mime type, failures.',
+                    {'limit': {'type': 'integer'}, **PAGE_PROP}, []),
+    'inspector_raw': (tool_inspector_raw, 'Send any Web Inspector protocol command to the page (e.g. Page.getCookies, DOM.getDocument, Debugger.enable) and return the result.',
+                      {'method': {'type': 'string'}, 'params': {'type': 'object'}, 'timeout': {'type': 'number'}, **PAGE_PROP}, ['method']),
+    'inspector_close': (tool_inspector_close, 'End the inspector connection (a page takes one frontend at a time). The next inspector call reconnects.', {}, []),
     'wake': (acting(tool_wake), 'Wake the display (it turns off after boot): a tap and then the home key.', {}, []),
     'wait': (tool_wait, 'Sleep up to 60 s (the guest is slow; animations take time).', {'seconds': {'type': 'number'}}, []),
     'log_tail': (tool_log_tail, 'Last lines of the guest console log, optionally filtered by a regex.',

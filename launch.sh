@@ -15,5 +15,7 @@ export QEMU_NET=1 QEMU_EFI="$Q/share/qemu/edk2-aarch64-code.fd" QEMU_VARS="$Q/sh
 # the wrapper in bin/ is found first on PATH inside the FHS shell; HACKIOS_MIGRATABLE and
 # HACKIOS_SNAPSHOT (a file written by vm_save) are set by server.py
 export REAL_QEMU="$Q/bin/qemu-system-aarch64"
+# QEMU's user network forwards a host port to the Web Inspector relay in the guest (guest/wi_relay.c, port 27753)
+export HACKIOS_HOSTFWD="${HACKIOS_HOSTFWD-tcp:127.0.0.1:${WI_PORT:-$((27753 + 10 * ${QEMU_INSTANCE:-0}))}-:27753}"
 [ -n "${HACKIOS_SNAPSHOT:-}" ] && export HACKIOS_INCOMING="exec:gzip -dc '$HACKIOS_SNAPSHOT'"
 exec "$STATE/fhs/bin/hfhs" -c "PATH='$HERE/bin':\$PATH; cd '$H' && common/run.sh qemu-virt $SECS"
