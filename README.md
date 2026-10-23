@@ -63,7 +63,24 @@ long default before you save.
 - The dyld cache has the keys `RemoteInspectorEnabled`, `RemoteInspectionEnabled`, `AllowRemoteInspection`,
   `DeveloperExtrasEnabled` and the notifications `com.apple.webinspectord.available` and `.automatic_inspection_enabled`.
   Which preference domain holds them is not known; the cache stores strings in a pool, so no neighbouring string helps.
-- Even with the daemon running, the host needs `lockdownd` (denied by `mkjobs.py`), a port forward, pairing and a usbmuxd shim.
+- `lockdownd` can be reached from the host (23 October, 5 boots): `seed/build-sh-lockdown-dir.txt` lists the steps. With
+  the job loaded, QEMU forwarding host 62078 to the guest, and `com.apple.mobile.wireless_lockdown-EnableWifiConnections`
+  (and `EnableWifiPairing`, `EnableWifiDebugging`) set in `/var/root/Library/Lockdown/data_ark.plist`, a plain lockdown
+  client gets `QueryType` (`com.apple.mobile.lockdown`), `ProductVersion` 16.5 and `DeviceName` iPhone.
+  Without the data_ark flags `lockdownd` closes every connection at accept: `socket_accept_callback: Killing the WiFi
+  connection immediately` (os_log, shown with `OSLOG=com.apple.mobile.lockdown`). The preference domain file
+  `com.apple.mobile.wireless_lockdown.plist` has no effect.
+- Pairing does not work over that path. `lockdownd` calls a connection USB only when its source is 127.0.0.1 and the peer
+  has pid 0 (`TCP_PEER_PID`, a kernel-owned socket); every other source is "WiFi". A WiFi connection that has no session
+  may read only a short list of keys, and `DevicePublicKey` is not on it (`GetProhibited`), so `pymobiledevice3` stops
+  before `Pair`. This is from reading the arm64 code, plus the log: one run each of `pymobiledevice3` 11.43.1 and a
+  raw client. Not tried: a pairing record put in the image, and a kernel-side relay that connects to 127.0.0.1:62078
+  from a kernel socket (pid 0).
+- `lockdownd` starts `com.apple.webinspector` as an XPC service (table `__TEXT,__services`: `XPCServiceName`); the
+  relay is `RWIRelay` in WebInspector.framework (dyld cache), so a guest-side bridge that talks to that mach service
+  and to TCP could skip lockdown. nixpkgs clang plus `ld64.lld` link an arm64 iOS binary against a hand-written
+  `libSystem.tbd` (tested with a 3-line program, not run in the guest); `ldid-procursus` would sign entitlements.
+  The message keys are not known yet.
 
 ## What cannot be done (yet)
 

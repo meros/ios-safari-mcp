@@ -3,6 +3,7 @@
 # QEMU refuses to save a guest that has a read-write vvfat disk or a virtio-sound device.
 #   REAL_QEMU           the real binary (required)
 #   HACKIOS_MIGRATABLE  1: read-only ESP, no sound device
+#   HACKIOS_HOSTFWD     extra hostfwd rules for QEMU's user network, e.g. "tcp:127.0.0.1:62078-:62078"
 #   HACKIOS_INCOMING    a QEMU -incoming URI to restore from, e.g. "exec:gzip -dc state.gz"
 : "${REAL_QEMU:?REAL_QEMU is not set}"
 if [ "$1" = "-device" ] && [ "$2" = "help" ]; then
@@ -17,6 +18,9 @@ while [ $# -gt 0 ]; do
 		-audiodev) shift 2; continue;;
 		-drive) case "$2" in *fat:rw:esp*) args+=("$1" "${2/fat:rw:esp/fat:esp},readonly=on"); shift 2; continue;; esac;;
 		esac
+	fi
+	if [ -n "$HACKIOS_HOSTFWD" ] && [ "$1" = "-netdev" ]; then
+		case "$2" in user,*) args+=("$1" "$2,hostfwd=$HACKIOS_HOSTFWD"); shift 2; continue;; esac
 	fi
 	args+=("$1"); shift
 done
