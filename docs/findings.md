@@ -98,7 +98,7 @@ State on 24 October 2026.
 | `oosexgang/hackios-xnu-kernel` | #8 7-Zip version check: merged. #9 loader asks the ramfb for a mode it accepts: merged. #6 macOS/ARM host fixes including the loader's fw_cfg DMA race: open (by someone else). #10 loader writes the ramfb DMA address as two 32-bit words: open (by someone else). #7 `#!/usr/bin/env bash` shebangs: open. |
 | `oosexgang/hackios-xnu-userland` | #7 `mkjobs.py` writes each on-demand job to its own file (the shadowed variable): open. The `drawable_test` copy guard has four open PRs (#5, #6, #8) and issue #1 from others. |
 
-Not reported anywhere yet: the boot where `backboardd` ignores the virtual touchscreen (about 1 in 10 boots, logs in the Boot section
-above), and `qemu/run.sh` copying the UEFI variables with `cp`, which keeps the read-only mode of a Nix store file (a `chmod u+w` after it
-fixes it). Three small hooks in the parent's build (extra launchd plists, extra binaries, extra deny words) would remove the need for
+Also open: kernel #12, `qemu/run.sh` copied the UEFI variables with `cp`, which keeps the read-only mode of a Nix store file (a
+`chmod u+w` after it fixes it; draft). Not reported anywhere yet: the boot where `backboardd` ignores the virtual touchscreen (about 1 in 10
+boots, logs in the Boot section above). Three small hooks in the parent's build (extra launchd plists, extra binaries, extra deny words) would remove the need for
 `apply-to-tree.py`; not proposed.
