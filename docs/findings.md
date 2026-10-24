@@ -5,8 +5,8 @@ guest is iOS 16.5 (20F66) on `xnu-8796`, QEMU 11.1 `virt` machine, TCG.
 
 ## Prerequisites in the parent that are not merged yet
 
-Each of these cost time. The first four are pull requests on the parent's repositories (open when this was written), so check
-their state before assuming a fix is missing:
+Each of these cost time. Most have a pull request on the parent's repositories; their state on 24 October 2026 is in the table at the
+end of this file, so check it before assuming a fix is missing:
 
 - **A black screen while iOS runs.** The prebuilt `xnuloader/loader.efi` configures QEMU's `ramfb` display with a fw_cfg DMA race:
   the guest boots and draws, and the screen stays black. Rebuild the loader with the `loader.c` hunk of
@@ -17,7 +17,7 @@ their state before assuming a fix is missing:
 - **`#!/bin/bash`.** NixOS has no `/bin/bash`; the scripts run in a small FHS shell (`scripts/fhs.nix`). PR #7 of the kernel repository
   changes the shebangs.
 - **7-Zip.** `ios165/fetch.sh` needs 7-Zip 23 or newer to read the APFS image; `p7zip` 17 lists raw partitions and the next step finds
-  0 files. The FHS shell provides `7zz` as `7z`. PR #8 of the kernel repository adds a version check.
+  0 files. The FHS shell provides `7zz` as `7z`. The version check (kernel PR #8) is merged.
 - `qemu/run.sh` copies the UEFI variables with `cp`, which keeps the read-only mode of the Nix store file; `launch.sh` makes a writable
   copy first. The default `rc.jobs` runs diagnostics (`cpu_test 240 &` burns CPU while SpringBoard starts) and never configures the
   network; `scripts/rc.jobs.mcp` runs DHCP on QEMU's virtio `en0` instead.
@@ -91,10 +91,14 @@ pair:
 
 ## Parent repositories
 
+State on 24 October 2026.
+
 | | |
 |---|---|
-| `oosexgang/hackios-xnu-kernel` | PR #6 loader display race (a comment is posted), PR #7 shebangs, PR #8 7-Zip check |
-| `oosexgang/hackios-xnu-userland` | PR #7 `mkjobs.py` variable shadowing |
+| `oosexgang/hackios-xnu-kernel` | #8 7-Zip version check: merged. #9 loader asks the ramfb for a mode it accepts: merged. #6 macOS/ARM host fixes including the loader's fw_cfg DMA race: open (by someone else). #10 loader writes the ramfb DMA address as two 32-bit words: open (by someone else). #7 `#!/usr/bin/env bash` shebangs: open. |
+| `oosexgang/hackios-xnu-userland` | #7 `mkjobs.py` writes each on-demand job to its own file (the shadowed variable): open. The `drawable_test` copy guard has four open PRs (#5, #6, #8) and issue #1 from others. |
 
-Three small hooks in the parent's build (extra launchd plists, extra binaries, extra deny words) would remove the need for
-`apply-to-tree.py`; not proposed yet.
+Not reported anywhere yet: the boot where `backboardd` ignores the virtual touchscreen (about 1 in 10 boots, logs in the Boot section
+above), and `qemu/run.sh` copying the UEFI variables with `cp`, which keeps the read-only mode of a Nix store file (a `chmod u+w` after it
+fixes it). Three small hooks in the parent's build (extra launchd plists, extra binaries, extra deny words) would remove the need for
+`apply-to-tree.py`; not proposed.
