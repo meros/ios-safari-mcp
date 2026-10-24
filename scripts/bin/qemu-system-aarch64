@@ -10,6 +10,9 @@ if [ "$1" = "-device" ] && [ "$2" = "help" ]; then
 	if [ -n "$HACKIOS_MIGRATABLE" ]; then "$REAL_QEMU" "$@" | grep -v virtio-sound-device; else "$REAL_QEMU" "$@"; fi
 	exit 0
 fi
+case "${HACKIOS_HOSTFWD:-}" in
+*,*|*" "*) echo "qemu wrapper: HACKIOS_HOSTFWD must be one hostfwd rule (tcp:127.0.0.1:PORT-:PORT), no comma or space: $HACKIOS_HOSTFWD" >&2; exit 2;;
+esac
 args=()
 while [ $# -gt 0 ]; do
 	if [ -n "$HACKIOS_MIGRATABLE" ]; then
@@ -20,7 +23,7 @@ while [ $# -gt 0 ]; do
 		esac
 	fi
 	if [ -n "$HACKIOS_HOSTFWD" ] && [ "$1" = "-netdev" ]; then
-		case "$2" in user,*) args+=("$1" "$2,hostfwd=$HACKIOS_HOSTFWD"); shift 2; continue;; esac
+		case "$2" in user|user,*) args+=("$1" "$2,hostfwd=$HACKIOS_HOSTFWD"); shift 2; continue;; esac
 	fi
 	args+=("$1"); shift
 done

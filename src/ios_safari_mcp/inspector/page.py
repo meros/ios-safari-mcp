@@ -97,6 +97,18 @@ FILL = r"""function(sel, index, value, change) {
   return e.value;
 }"""
 
+IS_ACTIVE = "function(sel, index) { return document.querySelectorAll(sel)[index] === document.activeElement; }"
+
+# the first match that a user could tap: it has a size, is shown, enabled and not read only
+FIRST_VISIBLE = r"""function(sel) {
+  var els = document.querySelectorAll(sel);
+  for (var i = 0; i < els.length; i++) {
+    var e = els[i], r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+    if (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && !e.disabled && !e.readOnly) return i;
+  }
+  return null;
+}"""
+
 BLUR = "function() { var a = document.activeElement; if (a && a !== document.body) { a.blur(); return true; } return false; }"
 
 # --- the event recorder -------------------------------------------------------------------------------------------------

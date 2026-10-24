@@ -4,6 +4,7 @@ A tool function takes the arguments dict and returns a result (results.text_resu
 failure with a message for the caller) or ValueError / KeyError / OSError (reported the same way).
 """
 import json
+import sys
 from dataclasses import dataclass
 
 from . import qemu, screen
@@ -56,6 +57,10 @@ def call(name, args):
         return text_result(str(e), error=True)
     except (KeyError, ValueError, TypeError, OSError) as e:
         return text_result(f'{name}: {type(e).__name__}: {e}', error=True)
+    except Exception as e:  # noqa: BLE001 - a bug in one tool or a bad argument must not end the server (the VM and the connections live in it)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return text_result(f'{name}: internal error, {type(e).__name__}: {e}', error=True)
 
 
 def listing():

@@ -6,7 +6,8 @@ HERE=$(dirname "$(readlink -f "$0")")
 ROOT=${IOS_SAFARI_MCP_ROOT:-$(dirname "$HERE")}
 H=${HACKIOS_DIR:-$ROOT/../hackios}
 STATE=${IOS_SAFARI_MCP_STATE:-$HOME/.local/state/ios-safari-mcp}
-[ -e "$STATE/fhs/bin/hfhs" ] || nix-build -I nixpkgs=flake:nixpkgs "$HERE/fhs.nix" -o "$STATE/fhs" >&2
+NIX_PATH_ARG=nixpkgs=${IOS_SAFARI_MCP_NIXPKGS:-flake:nixpkgs}
+[ -e "$STATE/fhs/bin/hfhs" ] || nix-build -I "$NIX_PATH_ARG" "$HERE/fhs.nix" -o "$STATE/fhs" >&2
 # a packaged install carries the relay it was built with (nix build .#wi-relay); a checkout builds it here
 [ -n "${IOS_SAFARI_MCP_PREBUILT_RELAY:-}" ] && [ -x "$ROOT/guest/wi_relay" ] || "$HERE/build-guest.sh"
 "$HERE/apply-to-tree.py" "$H"

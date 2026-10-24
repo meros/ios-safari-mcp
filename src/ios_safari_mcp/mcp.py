@@ -34,12 +34,24 @@ def serve(stdin=None, stdout=None):
         line = line.strip()
         if not line:
             continue
-        msg = json.loads(line)
+        try:
+            msg = json.loads(line)
+            if not isinstance(msg, dict):
+                raise ValueError('a request is a JSON object')
+        except ValueError as e:
+            stdout.write(json.dumps({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': f'parse error: {e}'}}) + '\n')
+            stdout.flush()
+            continue
         try:
             result = handle(msg)
         except (LookupError, KeyError) as e:
             stdout.write(json.dumps({'jsonrpc': '2.0', 'id': msg.get('id'),
                                      'error': {'code': -32601, 'message': f'unknown method or tool {e}'}}) + '\n')
+            stdout.flush()
+            continue
+        except Exception as e:  # noqa: BLE001 - answer and keep serving
+            stdout.write(json.dumps({'jsonrpc': '2.0', 'id': msg.get('id'),
+                                     'error': {'code': -32603, 'message': f'internal error: {type(e).__name__}: {e}'}}) + '\n')
             stdout.flush()
             continue
         if msg.get('id') is not None and result is not None:

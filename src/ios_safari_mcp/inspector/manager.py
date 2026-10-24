@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from .. import config
 from . import page
-from .client import Inspector, InspectorError
+from .client import Inspector, InspectorError, NavigationError
 
 _inspector = None
 
@@ -30,6 +30,9 @@ def connection():
     global _inspector
     if _inspector is not None and _inspector.dead is None:
         return _inspector
+    if _inspector is not None:
+        with contextlib.suppress(OSError, InspectorError):
+            _inspector.close()
     _inspector = None
     try:
         insp = Inspector(config.WI_PORT, connect_timeout=15, record=os.environ.get('IOS_SAFARI_MCP_RECORD'))
@@ -37,8 +40,13 @@ def connection():
         raise OSError(f'cannot reach the Web Inspector relay on 127.0.0.1:{config.WI_PORT} ({e}); is the VM running an image '
                       'built by `ios-safari-mcp build-image`, and has the guest finished booting?') from e
     # a page takes one frontend at a time: end the connections that an earlier run left behind
-    for stale in _stale_ids():
-        insp.forget_connection(stale)
+    try:
+        for stale in _stale_ids():
+            insp.forget_connection(stale)
+    except InspectorError:
+        with contextlib.suppress(OSError, InspectorError):
+            insp.close()
+        raise
     _save_ids([insp.connection_id])
     _inspector = insp
     return insp
@@ -47,7 +55,7 @@ def connection():
 def close():
     global _inspector
     if _inspector is not None:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError, InspectorError):
             _inspector.close()
         _inspector = None
     _save_ids([])
@@ -63,7 +71,8 @@ def session(args=None):
 # --- navigation --------------------------------------------------------------------------------------------------------
 def full_url(url):
     """Page.navigate needs a scheme: a bare name gets https, except localhost and addresses, which get http."""
-    if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:', url) and not re.match(r'^[^/]*:\d+(/|$)', url):
+    host_port = re.match(r'^(localhost|[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+):\d+(/|$)', url)       # example.com:8080, not tel:123
+    if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:', url) and not host_port:
         return url
     http = re.match(r'^(localhost|\d+\.\d+\.\d+\.\d+)(:\d+)?(/|$)', url)
     return ('http://' if http else 'https://') + url
@@ -104,9 +113,10 @@ def navigate(url, timeout=60, page_args=None):
         s.send('Page.navigate', {'url': target})
         via = 'the inspector'
         # the old page stays until the navigation commits: wait for that, then for the load to finish
-        nav = s.wait_event('Page.frameNavigated', since, min(timeout, 45), match=lambda p: not p.get('frame', {}).get('parentId'))
+        nav = s.wait_event(('Page.frameNavigated', 'Page.navigatedWithinDocument'), since, min(timeout, 45),
+                           match=lambda p: not p.get('frame', {}).get('parentId'))
         if nav is None:
-            return f'asked {via} for {target}, but the page did not navigate within {min(timeout, 45)} s'
+            raise NavigationError(f'asked {via} for {target}, but the page did not navigate within {min(timeout, 45)} s')
     else:
         # no web page, or one that does not attach (a page that was open when a snapshot was taken does not answer
         # afterwards): SpringBoard opens the address, which makes a page that does

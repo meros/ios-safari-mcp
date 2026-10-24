@@ -3,7 +3,8 @@
 IOS_SAFARI_MCP_ROOT    the directory with launch.sh, build-image.sh, guest/ (default: the checkout this package is in)
 HACKIOS_DIR            the hackios tree (default: ../hackios next to the checkout, then ~/hackios)
 IOS_SAFARI_MCP_STATE   log, pid file, snapshots, screenshots (default: $XDG_STATE_HOME/ios-safari-mcp)
-QEMU_INSTANCE          run several VMs side by side: the monitor, QMP and relay ports shift by 10 per instance
+QEMU_INSTANCE          the monitor, QMP and relay ports shift by 10 per instance. Two VMs of one hackios tree cannot run at the
+                       same time: the parent keeps one vars.fd and one esp/ per tree (use two trees)
 WI_PORT                host port that QEMU forwards to the guest's Web Inspector relay (default 27753 + 10 per instance)
 IOS_SAFARI_MCP_RECORD  a file: every frame received from the relay is appended to it as a line of JSON (for test fixtures)
 """
@@ -40,5 +41,8 @@ SHOTS = os.path.join('/tmp', f'ios-safari-mcp-{os.getuid()}')
 
 
 def ensure_dirs():
-    for d in (STATE, SNAPDIR, SHOTS):
+    for d in (STATE, SNAPDIR):
         os.makedirs(d, exist_ok=True)
+    os.makedirs(SHOTS, mode=0o700, exist_ok=True)
+    if os.stat(SHOTS).st_uid != os.getuid():
+        raise OSError(f'{SHOTS} belongs to another user')

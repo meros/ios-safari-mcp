@@ -34,7 +34,9 @@ def kb_pos(key):
 def plan_keys(text):
     """The taps that type `text`: a list of (page, key) with the page the keyboard must show."""
     out = []
-    for ch in text.lower():
+    if text != text.lower():
+        raise ValueError('upper case letters cannot be typed (the shift key is not mapped); use lower case or fill')
+    for ch in text:
         key = 'space' if ch == ' ' else ch
         out.append((kb_pos(key)[0], key))
     return out

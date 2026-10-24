@@ -2,7 +2,7 @@
 import time
 
 from .. import qemu, vm
-from ..inspector import InspectorError, manager, page
+from ..inspector import InspectorError, NavigationError, manager, page
 from ..registry import tool
 from ..results import ToolError, json_result, text_result
 from . import input as input_tools
@@ -13,11 +13,15 @@ PAGE_PROP = {'page': {'type': 'integer', 'description': 'index in inspector_page
 
 @tool('inspector_pages', 'List the pages that Safari offers to the Web Inspector (title, url). Safari must be running with a '
       'page open; safari_ready makes sure of that.',
-      {'all': {'type': 'boolean', 'description': 'also JavaScript contexts'}, 'wait': {'type': 'number'}})
+      {'all': {'type': 'boolean', 'description': 'also JavaScript contexts (they have no index: page= takes web pages only)'},
+       'wait': {'type': 'number'}})
 def inspector_pages(args):
     insp = manager.connection()
-    pages = insp.wait_for_pages(float(args.get('wait', 60)), kinds=None if args.get('all') else ('WIRTypeWebPage',))
-    return json_result([{'index': i, **p} for i, p in enumerate(pages)])
+    web = insp.wait_for_pages(float(args.get('wait', 60)))
+    out = [{'index': i, **p} for i, p in enumerate(web)]        # the index is what page= takes: a position among web pages
+    if args.get('all'):
+        out += [{'index': None, **p} for p in insp.pages(None) if p['type'] != 'WIRTypeWebPage']
+    return json_result(out)
 
 
 @tool('js', 'Run a JavaScript expression in the page and return its value as JSON. Milliseconds, no screenshot or typing.',
@@ -47,6 +51,8 @@ def open_url(args):
         return _open_by_typing(args)
     try:
         return text_result(manager.navigate(args['url'].strip(), float(args.get('timeout', 60)), args))
+    except NavigationError:
+        raise
     except (InspectorError, OSError) as e:
         note = f'inspector not usable ({e}); typing the address instead'
     result = _open_by_typing(args)
@@ -58,9 +64,10 @@ def _open_by_typing(args):
     """Safari must be in the foreground: tap the address bar, wait for the keyboard, type, press go, wait for the screen."""
     from .. import keyboard, screen
     url = args['url'].strip()
-    for prefix in ('https://', 'http://'):
-        if url.startswith(prefix):
-            url = url[len(prefix):]
+    if url.startswith('http://'):
+        raise ToolError('typing an address opens it as https, so an http:// address cannot be typed: use open_url without typing')
+    if url.startswith('https://'):
+        url = url[len('https://'):]
     keyboard.plan_keys(url)                                  # refuse an address with unknown keys before touching anything
     baseline = screen.grab_frame()
     qemu.touch('tap', 0.5, 0.875)
@@ -85,14 +92,18 @@ def reload(args):
     return text_result('reloading')
 
 
+def _tail(items, limit):
+    n = int(limit)
+    return items[-n:] if n > 0 else []
+
+
 @tool('console_messages', 'Console messages of the page since the inspector attached (level, text, url).',
       {'limit': {'type': 'integer'}, 'clear': {'type': 'boolean'}, **PAGE_PROP})
 def console_messages(args):
     s = manager.session(args)
-    out = [m['params']['message'] for m in list(s.events) if m.get('method') == 'Console.messageAdded']
-    if args.get('clear'):
-        s.events = type(s.events)((m for m in s.events if m.get('method') != 'Console.messageAdded'), maxlen=s.events.maxlen)
-    return json_result(out[-int(args.get('limit', 100)):])
+    keep = (lambda m: m.get('method') != 'Console.messageAdded') if args.get('clear') else None
+    out = [m['params']['message'] for m in s.snapshot_events(keep) if m.get('method') == 'Console.messageAdded']
+    return json_result(_tail(out, args.get('limit', 100)))
 
 
 @tool('network_log', 'Requests of the page since the inspector attached: url, method, status, mime type, failures.',
@@ -100,7 +111,7 @@ def console_messages(args):
 def network_log(args):
     s = manager.session(args)
     requests = {}
-    for m in list(s.events):
+    for m in s.snapshot_events():
         method, p = m.get('method', ''), m.get('params', {})
         if method == 'Network.requestWillBeSent':
             requests[p['requestId']] = {'url': p['request']['url'], 'method': p['request']['method']}
@@ -109,7 +120,7 @@ def network_log(args):
             requests[p['requestId']].update(status=r.get('status'), mime=r.get('mimeType'), source=r.get('source'))
         elif method == 'Network.loadingFailed' and p['requestId'] in requests:
             requests[p['requestId']]['failed'] = p.get('errorText')
-    return json_result(list(requests.values())[-int(args.get('limit', 100)):])
+    return json_result(_tail(list(requests.values()), args.get('limit', 100)))
 
 
 @tool('inspector_raw', 'Send any Web Inspector protocol command to the page (e.g. Page.getCookies, DOM.getDocument, '

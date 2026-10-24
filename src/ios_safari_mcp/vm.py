@@ -30,10 +30,32 @@ def log_text():
         return ''
 
 
+_launcher = None        # the Popen of the launcher this server started (reaped by poll, so it never stays a zombie)
+
+
+def _process_started(pid):
+    """When a process started (seconds since the epoch, from /proc), or None where /proc is not there."""
+    try:
+        ticks = int(Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19])      # field 22: start, in clock ticks since boot
+        boot = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime'))
+        return boot + ticks / os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, StopIteration, IndexError):
+        return None
+
+
 def launcher_pid():
+    """The pid of the launcher that this setup started, or None. A pid file survives a reboot and its pid can be reused: the
+    process must be alive, must not be a launcher of this server that has exited, and must have started when the file says (a reused
+    pid belongs to a process that started later; the launcher itself replaces its own image with exec, so its command line says nothing)."""
+    global _launcher
     try:
         pid = int(Path(config.PIDFILE).read_text().split()[0])
+        if _launcher is not None and _launcher.pid == pid and _launcher.poll() is not None:
+            return None
         os.kill(pid, 0)
+        recorded, began = started_at(), _process_started(pid)
+        if recorded is not None and began is not None and abs(began - recorded) > 60:
+            return None
         return pid
     except (OSError, ValueError, IndexError):
         return None
@@ -94,6 +116,17 @@ def snapshots():
     return out
 
 
+def _wait_file_stable(path, seconds=1.0, limit=30):
+    """The migration says completed when QEMU has written its end; gzip may still be flushing. Wait for the size to settle."""
+    last, end = -1, time.time() + limit
+    while time.time() < end:
+        size = os.path.getsize(path)
+        if size == last:
+            return
+        last = size
+        time.sleep(seconds)
+
+
 def save(name, resume=True, timeout=240):
     """Write the whole machine state (RAM, CPUs, devices) to a file. Needs a VM started with saveable=true."""
     if not qemu.alive():
@@ -109,21 +142,27 @@ def save(name, resume=True, timeout=240):
     while time.time() - t0 < min(timeout, 280):
         info = q.command('query-migrate')
         if info.get('status') == 'completed':
+            _wait_file_stable(tmp)
             os.replace(tmp, path)
             if resume:
                 q.command('cont')
             mb = os.path.getsize(path) // (1 << 20)
             return f'saved {name}: {mb} MB in {round(time.time() - t0)} s' + ('' if resume else '; the VM is paused')
         if info.get('status') in ('failed', 'cancelled'):
+            Path(tmp).unlink(missing_ok=True)
             raise ToolError('save failed: ' + json.dumps(info))
         time.sleep(2)
-    raise ToolError('save did not finish in time: ' + json.dumps(q.command('query-migrate')))
+    status_now = json.dumps(q.command('query-migrate'))
+    with contextlib.suppress(OSError, ToolError):
+        q.command('migrate_cancel')
+    Path(tmp).unlink(missing_ok=True)
+    raise ToolError('save did not finish in time and was cancelled: ' + status_now)
 
 
 # --- start, stop, wait --------------------------------------------------------------------------------------------------
 def start(seconds=28800, cpus=4, spinlock_timeout_us=60000000, snapshot=None, saveable=True):
-    if qemu.alive():
-        raise ToolError('QEMU is already running. Call vm_stop first for a fresh boot.\n' + json.dumps(status()))
+    if qemu.alive() or launcher_pid() is not None:
+        raise ToolError('QEMU is already running or starting. Call vm_stop first for a fresh boot.\n' + json.dumps(status()))
     # The guest gets loader_return_after=SECONDS and hands control back to the loader after that much guest time since
     # boot. A saved state keeps the clock, so a short value makes every snapshot die soon after it is restored.
     env = dict(os.environ, HACKIOS_DIR=config.HACKIOS, IOS_SAFARI_MCP_STATE=config.STATE, IOS_SAFARI_MCP_ROOT=config.ROOT,
@@ -141,8 +180,9 @@ def start(seconds=28800, cpus=4, spinlock_timeout_us=60000000, snapshot=None, sa
     env['QEMU_SMP'] = str(int(cpus))
     env['CMDLINE'] = f'cpus={int(cpus)} slto_us={int(spinlock_timeout_us)}'
     launcher = os.path.join(config.ROOT, 'scripts', 'launch.sh')
+    global _launcher
     with open(config.LOG, 'wb') as log:
-        p = subprocess.Popen([launcher], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
+        p = _launcher = subprocess.Popen([launcher], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
                              start_new_session=True)
     with open(config.PIDFILE, 'w') as f:
         f.write(f'{p.pid} {time.time()} {snapshot or ""}\n')
@@ -188,9 +228,12 @@ def wait_for(phase='springboard_owns_screen', timeout=240):
 def log_tail(lines=40, pattern=None):
     rows = log_text().splitlines()
     if pattern:
-        rx = re.compile(pattern)
+        try:
+            rx = re.compile(pattern)
+        except re.error as e:
+            raise ToolError(f'pattern is not a regular expression: {e}') from e
         rows = [r for r in rows if rx.search(r)]
-    return '\n'.join(r[:300] for r in rows[-min(int(lines), 400):])
+    return '\n'.join(r[:300] for r in rows[-max(1, min(int(lines), 400)):])
 
 
 def guest_process(name, timeout=20):

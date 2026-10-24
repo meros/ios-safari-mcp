@@ -5,11 +5,15 @@ HERE=$(dirname "$(readlink -f "$0")")
 ROOT=${IOS_SAFARI_MCP_ROOT:-$(dirname "$HERE")}
 H=${HACKIOS_DIR:-$ROOT/../hackios}
 STATE=${IOS_SAFARI_MCP_STATE:-$HOME/.local/state/ios-safari-mcp}
+# the nixpkgs of the flake's lock when packaged (IOS_SAFARI_MCP_NIXPKGS), else the one in the user's registry
+NP=${IOS_SAFARI_MCP_NIXPKGS:-nixpkgs}
+NIX_PATH_ARG=nixpkgs=${IOS_SAFARI_MCP_NIXPKGS:-flake:nixpkgs}
 SECS=${RUN_SECONDS:-1200}
 mkdir -p "$STATE"
-[ -e "$STATE/fhs/bin/hfhs" ] || nix-build -I nixpkgs=flake:nixpkgs "$HERE/fhs.nix" -o "$STATE/fhs" >&2
-Q=$(nix build nixpkgs#qemu --no-link --print-out-paths | head -1)
-# qemu/run.sh copies the vars file with cp and keeps the read-only mode of the Nix store file
+[ -e "$STATE/fhs/bin/hfhs" ] || nix-build -I "$NIX_PATH_ARG" "$HERE/fhs.nix" -o "$STATE/fhs" >&2
+Q=$(nix build "$NP#qemu" --no-link --print-out-paths | head -1)
+# qemu/run.sh copies the vars file with cp and keeps the read-only mode of the Nix store file. The parent keeps one vars.fd
+# (and one esp/) per tree, so two VMs of one tree cannot run at the same time: starting the second rewrites the first one's firmware variables.
 cp -f "$Q/share/qemu/edk2-arm-vars.fd" "$H/qemu/vars.fd"
 chmod u+w "$H/qemu/vars.fd"
 export QEMU_NET=1 QEMU_EFI="$Q/share/qemu/edk2-aarch64-code.fd" QEMU_VARS="$Q/share/qemu/edk2-arm-vars.fd"

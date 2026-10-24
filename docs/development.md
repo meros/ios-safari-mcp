@@ -2,7 +2,7 @@
 
 ```sh
 nix develop                      # python, pytest, ruff, clang, lld, ldid
-pytest tests                     # 42 tests, no VM, about 30 s
+pytest tests                     # 59 tests, no VM, about 40 s
 ruff check .
 nix flake check                  # builds the package (and runs the tests in the sandbox), the relay, and lint
 bin/ios-safari-mcp doctor        # the setup, with the fix for each problem

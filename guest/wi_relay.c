@@ -17,7 +17,7 @@
  * TCP side: one client at a time, frames of  u32 length (big endian) | u32 peer | data  where length counts
  * peer and data. From the guest the data is what a peer sent (peer = its number, from 1); a frame with no data says
  * that the peer is gone. To the guest, peer 0 means every peer; the data goes out as {"msgData": {"<UUID>": data}}
- * with the UUID that peer used (the first one seen, for a peer that has not sent yet).
+ * with the UUID that peer used (the last one it sent; before it has sent anything, CoreFoundation's constant).
  *
  * usage: wi_relay [PORT]    (default 27753; started by launchd)
  * Built without the iOS SDK (see ../build-guest.sh).
@@ -35,13 +35,16 @@ typedef void (^xpc_handler_t)(xpc_object_t);
 extern const struct _xpc_type_s _xpc_type_connection;
 extern const struct _xpc_type_s _xpc_type_dictionary;
 extern const struct _xpc_type_s _xpc_type_error;
+extern const struct _xpc_type_s _xpc_type_data;
 #define T_CONNECTION ((xpc_type_t)&_xpc_type_connection)
 #define T_DICTIONARY ((xpc_type_t)&_xpc_type_dictionary)
 #define T_ERROR ((xpc_type_t)&_xpc_type_error)
+#define T_DATA ((xpc_type_t)&_xpc_type_data)
 
 extern xpc_connection_t xpc_connection_create_mach_service(const char *name, dispatch_queue_t targetq, uint64_t flags);
 extern void xpc_connection_set_event_handler(xpc_connection_t c, xpc_handler_t handler);
 extern void xpc_connection_resume(xpc_connection_t c);
+extern void xpc_connection_cancel(xpc_connection_t c);
 extern void xpc_connection_send_message(xpc_connection_t c, xpc_object_t message);
 extern xpc_type_t xpc_get_type(xpc_object_t o);
 extern xpc_object_t xpc_dictionary_create(const char *const *keys, const xpc_object_t *values, size_t count);
@@ -64,6 +67,7 @@ extern int setsockopt(int, int, int, const void *, unsigned);
 extern long read(int, void *, unsigned long);
 extern long write(int, const void *, unsigned long);
 extern int close(int);
+extern int shutdown(int, int);
 extern int dprintf(int, const char *, ...);
 extern void (*signal(int, void (*)(int)))(int);
 extern int *__error(void);
@@ -94,6 +98,12 @@ struct pollfd_ {
 };
 extern int poll(void *, unsigned, int);
 
+struct timeval_ {          /* Darwin's struct timeval */
+	long sec;
+	int usec;
+	int pad;
+};
+
 struct sockaddr_in_ {
 	uint8_t len, family;
 	uint16_t port;
@@ -114,6 +124,11 @@ static void strncpy_(char *dst, const char *src, unsigned long n)
 #define MAX_PEERS 64
 #define CONTROL_PEER 0xFFFFFFFFu
 #define UTF8_ENCODING 0x08000100u   /* kCFStringEncodingUTF8 */
+#define SEND_TIMEOUT_S 5            /* a host that stops reading is dropped after this long */
+#define MAX_OPEN_URL 4              /* open-url commands running at once */
+#define MAX_MESSAGE (1u << 20)      /* a larger message from a process is dropped (and logged) */
+/* the key CoreFoundation's XPC encoding gives to a data value; the same in every process that was captured */
+#define CF_XPC_KEY "ECF19A18-7AA6-4141-B4DC-A2E5123B2B5C"
 
 /* pthread_mutex_t is 64 bytes on arm64 Darwin */
 static char lock[64] __attribute__((aligned(8)));
@@ -127,31 +142,68 @@ struct peer {
 static struct peer peers[MAX_PEERS];
 static int npeers;
 static uint32_t next_peer = 1;
-static char default_key[64];
-static volatile int client_fd = -1;
+static char default_key[64] = CF_XPC_KEY;
+static int client_fd = -1;                 /* guarded by `lock`: many threads read it, only the main thread closes it */
+static volatile int open_url_running;
 
+static int write_all(int fd, const uint8_t *p, size_t n)
+{
+	while (n > 0) {
+		long w = write(fd, p, n);
+		if (w < 0 && *__error() == 4 /* EINTR */) {
+			continue;
+		}
+		if (w <= 0) {
+			return 0;          /* an error, or the send timeout */
+		}
+		p += w;
+		n -= (size_t)w;
+	}
+	return 1;
+}
+
+/* One frame to the host, written in one piece under the lock: frames of different threads never interleave, and the
+ * client cannot be closed and its descriptor reused while a write is going on. A failed or timed out write ends the
+ * connection (shutdown wakes the main loop, which closes it): a half written frame must never be followed by another. */
 static void to_client(uint32_t peer, const void *data, size_t len)
 {
-	int fd = client_fd;
-	if (fd < 0) {
+	size_t total = len + 4;
+	uint8_t *frame = malloc(len + 8);
+	if (!frame) {
 		return;
 	}
-	size_t total = len + 4;
-	uint8_t head[8] = { (uint8_t)(total >> 24), (uint8_t)(total >> 16), (uint8_t)(total >> 8), (uint8_t)total,
-	    (uint8_t)(peer >> 24), (uint8_t)(peer >> 16), (uint8_t)(peer >> 8), (uint8_t)peer };
-	pthread_mutex_lock(&lock);
-	write(fd, head, 8);
-	for (size_t off = 0; off < len;) {
-		long w = write(fd, (const char *)data + off, len - off);
-		if (w <= 0) {
-			break;
-		}
-		off += (size_t)w;
+	frame[0] = (uint8_t)(total >> 24);
+	frame[1] = (uint8_t)(total >> 16);
+	frame[2] = (uint8_t)(total >> 8);
+	frame[3] = (uint8_t)total;
+	frame[4] = (uint8_t)(peer >> 24);
+	frame[5] = (uint8_t)(peer >> 16);
+	frame[6] = (uint8_t)(peer >> 8);
+	frame[7] = (uint8_t)peer;
+	if (len) {
+		memcpy(frame + 8, data, len);
 	}
+	pthread_mutex_lock(&lock);
+	if (client_fd >= 0 && !write_all(client_fd, frame, len + 8)) {
+		LOG("write to the client failed, dropping it\n");
+		shutdown(client_fd, 2 /* SHUT_RDWR */);
+	}
+	pthread_mutex_unlock(&lock);
+	free(frame);
+}
+
+/* the main thread only: swap or end the client under the lock */
+static void set_client(int fd)
+{
+	pthread_mutex_lock(&lock);
+	if (client_fd >= 0) {
+		close(client_fd);
+	}
+	client_fd = fd;
 	pthread_mutex_unlock(&lock);
 }
 
-static int peer_id(xpc_connection_t conn)
+static int peer_id_locked(xpc_connection_t conn)
 {
 	for (int i = 0; i < npeers; i++) {
 		if (peers[i].conn == conn) {
@@ -161,10 +213,18 @@ static int peer_id(xpc_connection_t conn)
 	return 0;
 }
 
+static int peer_id(xpc_connection_t conn)
+{
+	pthread_mutex_lock(&lock);
+	int id = peer_id_locked(conn);
+	pthread_mutex_unlock(&lock);
+	return id;
+}
+
 static void peer_gone(xpc_connection_t peer)
 {
 	pthread_mutex_lock(&lock);
-	int id = peer_id(peer);
+	int id = peer_id_locked(peer);
 	for (int i = 0; i < npeers; i++) {
 		if (peers[i].conn == peer) {
 			xpc_release(peers[i].conn);
@@ -183,7 +243,7 @@ static void peer_gone(xpc_connection_t peer)
 static void peer_message(xpc_connection_t peer, xpc_object_t msg)
 {
 	if (xpc_get_type(msg) == T_ERROR) {
-		/* connection invalid or interrupted: the peer is gone */
+		/* the connection of a process ended (invalid): the peer is gone */
 		char *d = xpc_copy_description(msg);
 		LOG("peer %d: %.160s\n", peer_id(peer), d ? d : "?");
 		free(d);
@@ -201,6 +261,10 @@ static void peer_message(xpc_connection_t peer, xpc_object_t msg)
 	}
 	int id = peer_id(peer);
 	xpc_dictionary_apply(inner, ^bool(const char *key, xpc_object_t value) {
+		if (xpc_get_type(value) != T_DATA) {
+			LOG("peer %d: a value of msgData is not data, ignored\n", id);
+			return true;
+		}
 		size_t len = xpc_data_get_length(value);
 		pthread_mutex_lock(&lock);
 		for (int i = 0; i < npeers; i++) {
@@ -210,7 +274,10 @@ static void peer_message(xpc_connection_t peer, xpc_object_t msg)
 		}
 		strncpy_(default_key, key, sizeof(default_key) - 1);
 		pthread_mutex_unlock(&lock);
-		if (len > 0 && len < (1u << 20)) {
+		if (len >= MAX_MESSAGE) {
+			LOG("peer %d: a message of %zu bytes is dropped\n", id, len);
+		}
+		if (len > 0 && len < MAX_MESSAGE) {
 			uint8_t *buf = malloc(len);
 			if (buf) {
 				xpc_data_get_bytes(value, buf, 0, len);
@@ -250,6 +317,15 @@ static void new_peer(xpc_connection_t peer)
 		p->id = id = (int)next_peer++;
 	}
 	pthread_mutex_unlock(&lock);
+	if (!id) {
+		LOG("more than %d processes: a connection is refused\n", MAX_PEERS);
+		xpc_connection_set_event_handler(peer, ^(xpc_object_t msg) {
+			(void)msg;
+		});
+		xpc_connection_resume(peer);
+		xpc_connection_cancel(peer);
+		return;
+	}
 	LOG("peer %d connected\n", id);
 	xpc_connection_set_event_handler(peer, ^(xpc_object_t msg) {
 		peer_message(peer, msg);
@@ -288,14 +364,25 @@ static void open_url(const char *text)
 		reply("error only http, https and about: addresses");
 		return;
 	}
+	for (const char *c = text; *c; c++) {
+		if ((uint8_t)*c < 0x20 || *c == 0x7f) {
+			reply("error a control character in the address");
+			return;
+		}
+	}
 	void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", 2 /* RTLD_NOW */);
-	int (*open)(CFURLRef, uint8_t) = sbs ? (int (*)(CFURLRef, uint8_t))dlsym(sbs, "SBSOpenSensitiveURLAndUnlock") : NULL;
-	CFURLRef url = CFURLCreateWithBytes(NULL, (const uint8_t *)text, (long)strlen(text), UTF8_ENCODING, NULL);
-	if (!open || !url) {
-		reply(open ? "error not a URL" : "error SBSOpenSensitiveURLAndUnlock is not available");
+	/* the function returns a BOOL, which is 8 bits: only the low byte of the result means anything */
+	uint8_t (*open)(CFURLRef, uint8_t) = sbs ? (uint8_t (*)(CFURLRef, uint8_t))dlsym(sbs, "SBSOpenSensitiveURLAndUnlock") : NULL;
+	if (!open) {
+		reply("error SBSOpenSensitiveURLAndUnlock is not available");
 		return;
 	}
-	int result = open(url, 1);
+	CFURLRef url = CFURLCreateWithBytes(NULL, (const uint8_t *)text, (long)strlen(text), UTF8_ENCODING, NULL);
+	if (!url) {
+		reply("error not a URL");
+		return;
+	}
+	uint8_t result = open(url, 1);
 	CFRelease(url);
 	LOG("SpringBoard was asked to open %s: %s\n", text, result ? "it does" : "it refuses");
 	reply(result ? "ok SpringBoard opens the address" : "error SpringBoard refuses (is the entitlement in the signature?)");
@@ -309,12 +396,21 @@ static void control(const char *data, size_t len)
 	}
 	memcpy(cmd, data, len);
 	cmd[len] = 0;
+	if (strncmp(cmd, "open-url ", 9) != 0) {
+		reply("error unknown command");
+		free(cmd);
+		return;
+	}
+	/* SpringBoard can take long, and each command holds a worker thread: a few at a time */
+	if (__sync_add_and_fetch(&open_url_running, 1) > MAX_OPEN_URL) {
+		__sync_sub_and_fetch(&open_url_running, 1);
+		reply("error busy: wait for the running open-url commands");
+		free(cmd);
+		return;
+	}
 	dispatch_async(dispatch_get_global_queue(0, 0), ^{
-		if (strncmp(cmd, "open-url ", 9) == 0) {
-			open_url(cmd + 9);
-		} else {
-			reply("error unknown command");
-		}
+		open_url(cmd + 9);
+		__sync_sub_and_fetch(&open_url_running, 1);
 		free(cmd);
 	});
 }
@@ -403,9 +499,10 @@ int main(int argc, char **argv)
 		if (p[0].revents & 1) {
 			int fd = accept(ls, NULL, NULL);
 			if (fd >= 0) {
+				struct timeval_ tv = { SEND_TIMEOUT_S, 0, 0 };
+				setsockopt(fd, 0xffff /* SOL_SOCKET */, 0x1005 /* SO_SNDTIMEO */, &tv, sizeof(tv));
 				if (client_fd >= 0) {
 					LOG("a new client replaces the old one\n");
-					close(client_fd);
 				}
 				LOG("client connected\n");
 				free(buf);
@@ -413,7 +510,7 @@ int main(int argc, char **argv)
 				have = 0;
 				want = 4;
 				reading_body = 0;
-				client_fd = fd;
+				set_client(fd);
 				replay_listings();
 			}
 			continue;
@@ -425,8 +522,7 @@ int main(int argc, char **argv)
 			long r = read(client_fd, buf + have, want - have);
 			if (r <= 0) {
 				LOG("client done\n");
-				close(client_fd);
-				client_fd = -1;
+				set_client(-1);
 				free(buf);
 				buf = NULL;
 				have = 0;
@@ -443,9 +539,8 @@ int main(int argc, char **argv)
 				free(buf);
 				buf = NULL;
 				if (len < 4 || len > (16u << 20)) {
-					LOG("bad frame length %zu\n", len);
-					close(client_fd);
-					client_fd = -1;
+					LOG("bad frame length %zu: the client is dropped\n", len);
+					set_client(-1);
 					have = 0;
 					want = 4;
 					continue;

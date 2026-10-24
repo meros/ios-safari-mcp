@@ -50,7 +50,9 @@ over loopback as Wi-Fi, and a Wi-Fi connection cannot pair (see [findings.md](fi
 ## Wire formats
 
 **XPC, between a process and the relay**: a dictionary `{"msgData": {"<UUID>": <data>}}`. The UUID is a constant of
-CoreFoundation's XPC encoding (the same in every process); the relay answers with the UUID it saw. The data is a property list
+CoreFoundation's XPC encoding (the same in every process that was captured); the relay answers each process with the UUID that
+process last sent, and with the constant before it has sent anything. A value that is not data is ignored (and logged), and a
+message of 1 MiB or more is dropped (and logged). The data is a property list
 in the `bplist15` format (below) holding `{messageName, userInfo}`.
 
 **`bplist15`**: the magic, an 8 byte integer (bit 63 set; the low bits count the bytes up to the end of the root object), a 4
@@ -62,8 +64,12 @@ reproduces them byte for byte. Arrays are read but not written, because none app
 **TCP, between the relay and the host**: frames of `u32 length | u32 peer | data` (big endian, `length` counts peer and data).
 `peer` is the number the relay gave the process (from 1). Host to guest, peer 0 means every process. A frame with no data says
 that a process is gone. Peer `0xFFFFFFFF` is the control channel: the host sends a command as text (`open-url URL`), the relay
-answers with a frame from the same peer (`ok ...` or `error ...`). The relay serves one host at a time; a new connection
-replaces the old one. On connect it replays what each process listed last, so a late host sees the pages at once.
+answers with a frame from the same peer (`ok ...` or `error ...`; `error busy` when four `open-url` commands are already running).
+The answer goes to the host that is connected when it is ready. A frame shorter than 4 or longer than 16 MiB ends the connection.
+The relay serves one host at a time; a new connection replaces the old one. On connect it replays what each process listed last,
+so a late host sees the pages at once. Frames go out whole and in order under one lock; a write that fails or takes more than 5 s
+ends the connection (a host that stops reading is dropped, the relay is not blocked). At most 64 processes are served; a 65th
+connection is refused and logged.
 
 ## The inspector protocol
 
@@ -116,6 +122,11 @@ through `calibration`. Closing by `blur()` is what pages do; the return key and 
   and no sound device (QEMU cannot migrate a read-write vvfat disk or a virtio-sound device).
 
 ## Trust
+
+Any process in the guest can connect to the relay's port, including a web page under test (`fetch('http://127.0.0.1:27753')`), and
+a new connection replaces the host's. The page cannot send a valid frame (an HTTP request fails the length check, which closes
+that connection), but a page that keeps connecting keeps the host disconnected; the host reconnects on its next call. There is no
+authentication, because the port is meant for one trusted host.
 
 The relay listens on 0.0.0.0 inside the guest's own NAT (QEMU user networking), which the outside reaches only through the
 forward bound to 127.0.0.1 on the host. Its one command, `open-url`, accepts `http:`, `https:` and `about:` addresses. The guest is a

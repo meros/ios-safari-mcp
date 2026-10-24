@@ -129,7 +129,9 @@ def test_keyboard_layout():
                           '.': (429, 1067), 's': (112, 905), 'e': (140, 825), 'go': (510, 1067)}.items():
         page, x, y = keyboard.kb_pos(key)
         assert page == 'abc' and abs(x - px) <= 3 and abs(y - py) <= 3, (key, x, y, px, py)
-    assert keyboard.plan_keys('Example.com 1') == [('abc', c) for c in 'example.com'] + [('abc', 'space'), ('123', '1')]
+    assert keyboard.plan_keys('example.com 1') == [('abc', c) for c in 'example.com'] + [('abc', 'space'), ('123', '1')]
+    with pytest.raises(ValueError, match='upper case'):
+        keyboard.plan_keys('Example.com')
     for ch in 'abcdefghijklmnopqrstuvwxyz0123456789 .-/:':
         _, x, y = keyboard.kb_pos('space' if ch == ' ' else ch)
         assert 0 < x < keyboard.KB_W and 0 < y < keyboard.KB_H, ch

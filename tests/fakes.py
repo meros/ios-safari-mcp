@@ -37,8 +37,10 @@ class FakeRelay:
         self.conn = None
         self.url = 'http://example.com/'
         self.keyboard = False
-        self.active = None          # the focused field, or None
+        self.active = None          # the selector of the focused field, or None
+        self.last_selector = '#q'   # the selector of the last element whose rectangle was asked for
         self.opened = []            # addresses that SpringBoard was asked to open
+        self.no_navigate = False    # Page.navigate is accepted but the page never navigates
         self.refuse = set()         # page ids that do not answer the setup (as after a snapshot restore)
         self.extra = {}             # pages that open-url added: id -> url
         threading.Thread(target=self._serve, daemon=True).start()
@@ -140,7 +142,7 @@ class FakeRelay:
 
     def _state(self):
         vv_h = 366 if self.keyboard else 635
-        active = {'tag': 'input', 'id': 'q', 'text': 'Search', 'top': 100, 'bottom': 149, 'position': 'static'} if self.active else None
+        active = {'tag': 'input', 'id': str(self.active).lstrip('#'), 'text': 'Search', 'top': 100, 'bottom': 149, 'position': 'static'} if self.active else None
         return {
             'keyboardVisible': self.keyboard, 'keyboardHeight': 635 - vv_h,
             'layoutViewport': {'width': 375, 'height': 635},
@@ -158,7 +160,7 @@ class FakeRelay:
         events = []
         if method == 'Page.navigate':
             self.url = params['url']
-            events = [{'method': 'Page.frameNavigated', 'params': {'frame': {'id': '0.1', 'url': self.url}}}]
+            events = [] if self.no_navigate else [{'method': 'Page.frameNavigated', 'params': {'frame': {'id': '0.1', 'url': self.url}}}]
             return {'id': cmd['id'], 'result': {}}, events
         if method != 'Runtime.evaluate':
             return {'id': cmd['id'], 'result': {}}, events
@@ -171,6 +173,10 @@ class FakeRelay:
             return {'id': cmd['id'], 'result': {'result': {'type': 'object'}, 'wasThrown': True}}, events
         elif 'keyboardVisible' in expr:
             value = self._state()
+        elif '=== document.activeElement' in expr:                    # IS_ACTIVE
+            value = self.active is not None and self.active == self._first_arg(expr)
+        elif 'e.readOnly' in expr:                                   # FIRST_VISIBLE
+            value = 0
         elif 'return [innerWidth' in expr:                           # LAYOUT_KEY
             value = [375, 635, 0, 0, 1, 366 if self.keyboard else 635]
         elif 'getElementById' in expr and 'document.createElement' in expr or 'd.remove()' in expr:   # MARKER_ADD
@@ -178,6 +184,7 @@ class FakeRelay:
         elif 'scrollIntoView' in expr:
             value = True if '"#missing"' not in expr else None
         elif 'getBoundingClientRect' in expr and 'r.left + r.width / 2' in expr:   # RECT
+            self.last_selector = self._first_arg(expr)
             value = None if '"#missing"' in expr else {'x': 252.0, 'y': 124.0, 'width': 200, 'height': 40, 'tag': 'input', 'text': 'Search'}
         elif 'a.blur()' in expr:
             self.keyboard, self.active = False, None
@@ -195,10 +202,16 @@ class FakeRelay:
             value = eval(expr)  # noqa: S307 (digits and operators only)
         return {'id': cmd['id'], 'result': {'result': {'type': 'string', 'value': value}, 'wasThrown': False}}, events
 
+    @staticmethod
+    def _first_arg(expr):
+        """The first JSON string argument of `(function...)("sel", ...)`: the selector the tool passed."""
+        m = re.search(r'\)\(("(?:[^"\\]|\\.)*")', expr)
+        return json.loads(m.group(1)) if m else None
+
     def tap(self, fx, fy):
         """A touch on the screen: opens the keyboard when it lands on the field (the model says where the field is)."""
         if 0.60 < fx < 0.72 and 0.19 < fy < 0.22:
-            self.keyboard, self.active = True, 'q'
+            self.keyboard, self.active = True, self.last_selector
         elif self.keyboard and 0.88 < fx < 0.93 and 0.55 < fy < 0.57:      # the Done button above the keyboard
             self.keyboard, self.active = False, None
 

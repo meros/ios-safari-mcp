@@ -36,6 +36,10 @@ class InspectorError(Exception):
     pass
 
 
+class NavigationError(InspectorError):
+    """The inspector works, but the page did not navigate: not a reason to type the address instead."""
+
+
 def decode(blob):
     """A property list from an app: bplist15 (what the apps send) or bplist00."""
     if blob[:8] == b'bplist00':
@@ -98,7 +102,7 @@ class Inspector:
                     with self.cond:
                         self.peers.pop(peer, None)
                         for key in [k for k in self.sessions if k[0] == peer]:
-                            self.sessions.pop(key)
+                            self.sessions.pop(key).tasks.put(None)      # ends its worker thread
                         self.cond.notify_all()
                     continue
                 try:
@@ -107,7 +111,11 @@ class Inspector:
                     if self.debug:
                         print('undecodable from peer', peer, e, data[:40].hex(), file=sys.stderr)
                     continue
-                self._handle(peer, message)
+                try:
+                    self._handle(peer, message)
+                except Exception as e:  # noqa: BLE001 - one odd message (a missing key, a wrong type) must not end the connection
+                    if self.debug:
+                        print('could not handle a message from peer', peer, repr(e), file=sys.stderr)
         except Exception as e:  # noqa: BLE001 - the connection ended: wake everybody who waits
             with self.cond:
                 self.dead = e
@@ -180,7 +188,7 @@ class Inspector:
         try:
             self.forget_connection(self.connection_id)
             time.sleep(0.5)
-        except OSError:
+        except (OSError, InspectorError):
             pass
         finally:
             # close() alone does not end the connection while the reader thread waits in recv()
@@ -249,12 +257,15 @@ class Inspector:
     # --- sessions --------------------------------------------------------------------------------------------------
     def attach(self, page, timeout=30):
         s = Session(self, page['peer'], page['page'])
-        self.sessions[(s.peer, s.page)] = s
+        with self.cond:
+            self.sessions[(s.peer, s.page)] = s
         try:
             s.start(timeout)
         except InspectorError:
-            self.sessions.pop((s.peer, s.page), None)
-            self.broken.add((s.peer, s.page))
+            with self.cond:
+                self.sessions.pop((s.peer, s.page), None)
+                self.broken.add((s.peer, s.page))
+            s.tasks.put(None)
             raise
         return s
 
@@ -352,6 +363,8 @@ class Session:
         """Enable the domains on every page target that appears after the first (a navigation makes a new one)."""
         while True:
             target = self.tasks.get()
+            if target is None:
+                return
             for domain in list(self.domains):
                 with contextlib.suppress(InspectorError):
                     self.send(f'{domain}.enable', target=target, timeout=30)
@@ -377,6 +390,14 @@ class Session:
             raise InspectorError(f'{method}: {reply["error"]}')
         return reply.get('result', {})
 
+    def snapshot_events(self, keep=None):
+        """The events as a list; with `keep` (a predicate), the events it rejects are removed afterwards, atomically."""
+        with self.insp.cond:
+            items = list(self.events)
+            if keep is not None:
+                self.events = collections.deque((m for m in items if keep(m)), maxlen=self.events.maxlen)
+            return items
+
     def events_since(self, count):
         """The events that arrived after event number `count` (as returned by event_count), oldest first."""
         with self.insp.cond:
@@ -384,13 +405,14 @@ class Session:
             return list(self.events)[-fresh:] if fresh > 0 else []
 
     def wait_event(self, method, since, timeout, match=None):
-        """Wait for an event of this method that arrived after event number `since` (see event_count)."""
+        """Wait for an event of this method (or one of several: a tuple) that arrived after event number `since`."""
+        methods = (method,) if isinstance(method, str) else tuple(method)
         end = time.time() + timeout
         with self.insp.cond:
             while time.time() < end:
                 fresh = self.event_count - since
                 for m in (list(self.events)[-fresh:] if fresh > 0 else []):
-                    if m.get('method') == method and (match is None or match(m.get('params', {}))):
+                    if m.get('method') in methods and (match is None or match(m.get('params', {}))):
                         return m
                 self.insp._check()
                 self.insp.cond.wait(0.5)

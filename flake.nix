@@ -45,6 +45,7 @@
           makeWrapperArgs = [
             "--set" "IOS_SAFARI_MCP_ROOT" "${placeholder "out"}/share/ios-safari-mcp"
             "--set" "IOS_SAFARI_MCP_PREBUILT_RELAY" "1"
+            "--set" "IOS_SAFARI_MCP_NIXPKGS" "${nixpkgs}"
             "--prefix" "PATH" ":" (pkgs.lib.makeBinPath [ pkgs.nix pkgs.gzip pkgs.coreutils pkgs.bash pkgs.gnugrep ])
           ];
           meta = {

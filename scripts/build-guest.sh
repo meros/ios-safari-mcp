@@ -8,11 +8,12 @@ set -eu
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(dirname "$HERE")
 OUT=${1:-$ROOT/guest/wi_relay}
-nix shell nixpkgs#llvmPackages.clang-unwrapped nixpkgs#lld nixpkgs#ldid-procursus --command sh -c "
+NP=${IOS_SAFARI_MCP_NIXPKGS:-nixpkgs}
+nix shell "$NP#llvmPackages.clang-unwrapped" "$NP#lld" "$NP#ldid-procursus" --command sh -c "
 	set -eu
 	clang --target=arm64-apple-ios16.5 -nostdlibinc -fblocks -O1 -Wall -Werror -c '$ROOT/guest/wi_relay.c' -o '$OUT.o'
 	ld64.lld -arch arm64 -platform_version ios 16.5 16.5 -o '$OUT' '$OUT.o' '$ROOT/guest/libSystem.tbd' '$ROOT/guest/CoreFoundation.tbd' -e _main
 	ldid -S'$ROOT/guest/wi_relay.entitlements' '$OUT'
 "
 rm -f "$OUT.o"
-file "$OUT"
+ls -l "$OUT"

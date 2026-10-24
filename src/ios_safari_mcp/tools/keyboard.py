@@ -16,7 +16,8 @@ from ..registry import tool
 from ..results import ToolError, json_result, text_result
 from .inspector import PAGE_PROP
 
-DEFAULT_FIELD = 'input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]),textarea'
+DEFAULT_FIELD = ('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button])'
+                 ':not([type=file]):not([type=image]):not([type=range]):not([type=color]):not([type=reset]),textarea')
 # the Done button of Safari's form accessory bar, as fractions of the screen (measured on a screenshot with the keyboard up)
 DONE_BUTTON = (0.909, 0.560)
 SELECTOR_PROPS = {'selector': {'type': 'string', 'description': 'CSS selector of the element'},
@@ -27,14 +28,19 @@ def state(s):
     return manager.evaluate_json(s, page.STATE)
 
 
-def _wait_keyboard(s, visible, timeout):
-    """Poll until the keyboard is up (or down). The guest animates slowly: 5 to 30 s are normal."""
+def _wait_keyboard(s, visible, timeout, field=None):
+    """Poll until the keyboard is up (or down), and with `field` = (selector, index) until that field has the focus. The guest
+    animates slowly: 5 to 30 s are normal."""
+    def done(st):
+        if st['keyboardVisible'] != visible:
+            return False
+        return not (visible and field and not manager.evaluate_json(s, page.IS_ACTIVE, *field))
     t0 = time.time()
     st = state(s)
-    while st['keyboardVisible'] != visible and time.time() - t0 < timeout:
+    while not done(st) and time.time() - t0 < timeout:
         time.sleep(1.5)
         st = state(s)
-    return st, time.time() - t0
+    return st, time.time() - t0, done(st)
 
 
 def _rect(s, selector, index):
@@ -47,6 +53,9 @@ def _rect(s, selector, index):
 def _tap_css(s, x, y):
     cal = calibration.calibrate(s)
     fx, fy = cal.to_fractions(x, y)
+    if not (0 <= fx <= 1 and 0 <= fy <= 1):
+        raise ToolError(f'the point ({x:.0f}, {y:.0f}) CSS px is off the screen (screen fractions {fx}, {fy}): scroll it into view '
+                        '(scroll_into_view) or close the keyboard first')
     ok, out = qemu.touch('tap', fx, fy)
     if not ok:
         raise ToolError(out)
@@ -77,17 +86,19 @@ def keyboard_show(args):
     s = manager.session(args)
     selector, index = args['selector'], int(args.get('index', 0))
     st = state(s)
-    if st['keyboardVisible'] and st['active'] and st['activeVisible']:
-        return json_result({'already_visible': True, **st})
-    if args.get('scroll', True) and not st['keyboardVisible']:
-        if manager.evaluate_json(s, page.SCROLL_INTO_VIEW, selector, index, 'center') is None:
+    if st['keyboardVisible'] and st['activeVisible'] and manager.evaluate_json(s, page.IS_ACTIVE, selector, index):
+        return json_result({'already_visible': True, **st})        # up, and on this field
+    if args.get('scroll', True):
+        # with the keyboard up the page scrolls the least; with it down the field goes to the middle
+        block = 'nearest' if st['keyboardVisible'] else 'center'
+        if manager.evaluate_json(s, page.SCROLL_INTO_VIEW, selector, index, block) is None:
             raise ToolError(f'no element for {selector!r} (index {index})')
         time.sleep(2)
     tapped = _tap_css(s, *(lambda r: (r['x'], r['y']))(_rect(s, selector, index)))
-    st, took = _wait_keyboard(s, True, float(args.get('timeout', 120)))
-    if not st['keyboardVisible']:
-        raise ToolError(f'the keyboard did not appear within {args.get("timeout", 120)} s after the tap '
-                        f'(is {selector!r} a text field?). {json.dumps(_summary(st))}')
+    st, took, ok = _wait_keyboard(s, True, float(args.get('timeout', 120)), (selector, index))
+    if not ok:
+        raise ToolError(f'the keyboard did not appear on {selector!r} within {args.get("timeout", 120)} s after the tap '
+                        f'(is it a text field?). {json.dumps(_summary(st))}')
     return json_result({'opened_in_s': round(took, 1), 'tapped': tapped, **st})
 
 
@@ -117,7 +128,7 @@ def keyboard_hide(args):
         _tap_css(s, float(args.get('x', 2)), float(args.get('y', vv['offsetTop'] + vv['height'] / 2)))
     else:
         raise ToolError('method: blur, done, return or tap_outside')
-    st, took = _wait_keyboard(s, False, float(args.get('timeout', 90)))
+    st, took, _ = _wait_keyboard(s, False, float(args.get('timeout', 90)))
     if st['keyboardVisible']:
         raise ToolError(f'the keyboard is still up {took:.0f} s after {method}. {json.dumps(_summary(st))}')
     return json_result({'closed_in_s': round(took, 1), 'method': method, **_summary(st),
@@ -214,6 +225,11 @@ def keyboard_check(args):
     s = manager.session(args)
     selector = args.get('selector') or DEFAULT_FIELD
     index = int(args.get('index', 0))
+    if not args.get('selector'):          # no field named: the first one a user could tap
+        first = manager.evaluate_json(s, page.FIRST_VISIBLE, selector)
+        if first is None:
+            raise ToolError('no visible, enabled text field on the page: name one with selector')
+        index = first
     manager.evaluate_json(s, page.RECORDER_INSTALL)
     before = state(s)
     shown = json.loads(keyboard_show({**args, 'selector': selector, 'index': index})['content'][0]['text'])
