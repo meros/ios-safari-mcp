@@ -63,6 +63,7 @@ class Inspector:
         self.peers = {}          # peer number -> {'listing': {page id: info}, 'seen': time}
         self.log = collections.deque(maxlen=2000)    # (time, peer, message name, user info) of what was received
         self.sessions = {}       # (peer, page) -> Session
+        self.broken = set()      # (peer, page) of pages that did not answer the setup: skipped when choosing a page
         self.control = collections.deque()           # answers of the relay to control commands
         self.connection_id = str(uuid.uuid4()).upper()
         self.dead = None
@@ -129,8 +130,14 @@ class Inspector:
 
     def _write(self, peer, data):
         body = struct.pack('>I', peer) + data
-        with self.lock:
-            self.sock.sendall(struct.pack('>I', len(body)) + body)
+        try:
+            with self.lock:
+                self.sock.sendall(struct.pack('>I', len(body)) + body)
+        except OSError as e:
+            with self.cond:
+                self.dead = self.dead or e
+                self.cond.notify_all()
+            raise InspectorError(f'connection lost: {e}') from e
 
     def send(self, peer, message_name, user_info):
         if self.debug:
@@ -212,14 +219,29 @@ class Inspector:
                 self.cond.wait(1)
         return self.pages(kinds)
 
+    def wait_for_page(self, before, host, timeout):
+        """The page that SpringBoard's open-url made: one that is not in `before` (a set of (peer, page)), or one whose address
+        now has `host`. None if neither shows within the timeout (a slow guest lists a new page late)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            self._check()
+            pages = [p for p in self.pages() if (p['peer'], p['page']) not in self.broken]
+            fresh = [p for p in pages if (p['peer'], p['page']) not in before or (host and host in p['url'])]
+            if fresh:
+                return max(fresh, key=lambda p: p['page'])
+            time.sleep(1)
+        return None
+
     def select(self, index=None, wait=60):
-        """The page to work on: an index into pages(), default the first one that has a real address."""
+        """The page to work on: an index into pages(), default the newest one that has a real address."""
         pages = self.wait_for_pages(wait)
         if not pages:
             raise InspectorError('no web page is listed: is Safari running with a page open? (safari_ready opens one)')
         if index is None:
-            real = [p for p in pages if p['url'] and p['url'] != 'about:blank']
-            return (real or pages)[0]
+            # the newest page that has a real address and has not refused us (ids grow as pages are opened)
+            usable = [p for p in pages if (p['peer'], p['page']) not in self.broken] or pages
+            real = [p for p in usable if p['url'] and p['url'] != 'about:blank']
+            return max(real or usable, key=lambda p: p['page'])
         if not 0 <= index < len(pages):
             raise InspectorError(f'page {index} is not in the list of {len(pages)}')
         return pages[index]
@@ -232,6 +254,7 @@ class Inspector:
             s.start(timeout)
         except InspectorError:
             self.sessions.pop((s.peer, s.page), None)
+            self.broken.add((s.peer, s.page))
             raise
         return s
 
@@ -275,7 +298,8 @@ class Session:
                 self.insp._check()
                 self.insp.cond.wait(0.5)
         if self.target is None:
-            raise InspectorError('the page did not answer the setup (is another frontend attached to it?)')
+            raise InspectorError('the page did not answer the setup (another frontend is attached, or the page was open before a snapshot '
+                                 'was restored and is no longer inspectable: open_url makes a fresh page)')
         for domain in ('Console', 'Network', 'Page'):
             try:
                 self.send(f'{domain}.enable', timeout=30)

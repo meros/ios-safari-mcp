@@ -21,19 +21,17 @@ Apple code and changes none of the parent's source by hand: it patches a few lin
 
 ## Status
 
-Read this before relying on it. "Verified live" means: run against the real guest on 23 October 2026, on one machine.
+Read this before relying on it. "Verified live" means: run against the real guest, 24 October 2026, on one machine.
 
 | | |
 |---|---|
-| Verified live | the relay takes `webinspectord`'s place and Safari's processes connect to it; page listing; attach; `Runtime.evaluate`; DOM queries; `Page.navigate`; console and network events; screenshots, taps, boot, save and restore (earlier sessions); the keyboard opening on a real tap and closing on `blur()` (through a prototype script with the same logic as the keyboard tools) |
-| Verified offline | 38 tests (`nix flake check`): the property list format against bytes captured from Safari, the client and every tool against a fake relay, calibration, the keyboard tools, the JSON-RPC surface, lint |
-| **Not yet verified live** | the packaged tools through one long-lived MCP session; the relay's `open-url` command (page-less navigation through SpringBoard) and its replace-the-old-client loop; `safari_ready` end to end; snapshot save and restore with this image; `keyboard_check` as shipped (its parts were run, the whole was not); the relay signed as shipped (only the SpringBoard entitlement; the live runs used a different set) |
-
-`tests/live/smoke.py` runs all of that against a running VM and prints a line with the time for each step.
+| Verified live | on a fresh boot of an image built by `ios-safari-mcp build-image`, through one long-lived MCP session (`tests/live/smoke.py`, 13 steps, all passed): `safari_ready` (SpringBoard opened example.com, no tap, no typing), `inspector_pages`, `js`, `dom`, `navigate`, `open_url`, `network_log`, `console_messages`, `screenshot`, `keyboard_state`, `keyboard_check`; also `keyboard_show` and `keyboard_hide` (`blur` and `done`); `vm_save`, and a restore from that snapshot with the inspector working afterwards (see Known problems) |
+| Verified offline | 42 tests (`nix flake check`, also green on GitHub Actions): the property list format against 24 frames captured from Safari, the client and every tool against a fake relay, calibration, the keyboard tools, the JSON-RPC surface, lint |
+| **Not verified live** | `keyboard_events`, `tap_element`, `tap_css`, `scroll_into_view`, `keyboard_hide` by `return` and `tap_outside`; `type_text` on any keyboard but Safari's address bar; the relay replacing a client that is still connected; Safari on other iOS versions or other screen sizes (all runs: iPhone X, 375 x 812 points) |
 
 ## Quick start
 
-You need Linux, [Nix](https://nixos.org/download) with flakes, 12 GB of RAM and 10 GB of disk. The VM boots in 9 to 14 minutes
+You need Linux, [Nix](https://nixos.org/download) with flakes, 12 GB of RAM and 10 GB of disk. The VM boots in 7 to 14 minutes
 (software emulation, no KVM on an x86 host); a restored snapshot takes about 30 seconds.
 
 1. **Get the parent and the iOS files.** Check out the HackiOS kernel and userland repositories into one tree as their README
@@ -95,24 +93,27 @@ stayed visible, and the viewport recovered after `blur()`.
 ## Measured
 
 Intel Core Ultra 7 258V, on battery with turbo off, host load 4 to 13 from other work. The guest draws in software, so it is slow
-by phone standards; the inspector is fast because it does not draw.
+by phone standards; the inspector is fast on an idle page and slow while a heavy page is still loading.
 
-| What | Time | Runs |
-|---|---|---|
-| attach to a page | 0.1 s | 3 |
-| `js` `1 + 1` | 17 to 76 ms | 5 |
-| navigate to a loaded site (plain HTTP) | 2.6 s | 1 |
-| first HTTPS load of example.com (cold) | 57 to 87 s | 2 |
-| `screenshot` | 0.22 s | many |
-| a tap until the screen shows the result | 14 to 60 s | many |
-| keyboard open after the tap / closed after `blur()` | 7 to 28 s / 8 to 10 s | 2 / 2 |
-| boot to SpringBoard | 9 to 14 min | earlier sessions |
-| restore a snapshot / `vm_save` (2.9 GB) | 28 s / 70 to 98 s | earlier sessions |
+| What | Time |
+|---|---|
+| attach to a page | 0.1 s |
+| `js` `1 + 1` on an idle page / on example.com while it loaded | 17 to 76 ms / 2 to 6 s |
+| navigate to a loaded site through the inspector (plain HTTP / example.com, warm) | 2.6 s / 15 to 20 s |
+| first HTTPS load of a site after boot (cold) | 57 to 87 s |
+| `safari_ready` from SpringBoard with Safari not running | 74 s |
+| `screenshot` | 0.22 s |
+| a tap until the screen shows the result | 14 to 60 s |
+| keyboard open after a real tap / closed by `blur()` / by `Done` | 4 to 28 s / 8 to 10 s / 2 s |
+| `keyboard_check` (open, type, report, screenshot, close) | 81 s |
+| boot to SpringBoard | 7 to 14 min |
+| `vm_save` (2.9 GB) / restore | 112 s / 18 s |
 
 ## Known problems
 
 | Symptom | Cause and what to do |
 |---|---|
+| After a restore, the page that was open does not answer (`js` says "did not answer the setup") | A page that was open when a snapshot was restored is no longer inspectable; new pages are. `open_url` notices, asks SpringBoard to open the address and attaches to the new page (15 s). |
 | Taps do nothing | In some boots `backboardd` does not accept the virtual touchscreen (a start-up race in the guest). `vm_status` shows `touchscreen: not recognized`. `vm_stop` and `vm_start` again. Seen once in about ten boots. |
 | Pages fail with "network connection was lost" right after boot | The guest network needs a few minutes to warm up (the first DNS lookup took 26 s). Wait and retry. |
 | `inspector_pages` is empty | Safari is not running, or shows its native start page (no web page exists). `safari_ready` or `open_url` opens one. |

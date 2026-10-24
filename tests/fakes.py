@@ -39,6 +39,8 @@ class FakeRelay:
         self.keyboard = False
         self.active = None          # the focused field, or None
         self.opened = []            # addresses that SpringBoard was asked to open
+        self.refuse = set()         # page ids that do not answer the setup (as after a snapshot restore)
+        self.extra = {}             # pages that open-url added: id -> url
         threading.Thread(target=self._serve, daemon=True).start()
 
     # --- frames ------------------------------------------------------------------------------------------------------
@@ -60,8 +62,8 @@ class FakeRelay:
         while True:
             self.conn, _ = self.srv.accept()
             try:
-                if self.with_page:
-                    self.frame(1, LISTING)          # the relay replays what each process listed last
+                if self.with_page or self.extra:
+                    self.frame(1, self.listing())   # the relay replays what each process listed last
                 self.frame(2, JS_LISTING)
                 while True:
                     length = struct.unpack('>I', self._read(4))[0]
@@ -80,15 +82,25 @@ class FakeRelay:
                 import traceback
                 traceback.print_exc()
 
+    def listing(self):
+        pages = {'1': {'WIRTitleKey': 'Example Domain', 'WIRTypeKey': 'WIRTypeWebPage', 'WIRURLKey': 'http://example.com/', 'WIRPageIdentifierKey': 1}} \
+            if self.with_page else {}
+        for pid, url in self.extra.items():
+            pages[str(pid)] = {'WIRTitleKey': 'Opened', 'WIRTypeKey': 'WIRTypeWebPage', 'WIRURLKey': url, 'WIRPageIdentifierKey': pid}
+        return {**LISTING, 'userInfo': {**LISTING['userInfo'], 'WIRListingKey': pages}}
+
     def _control(self, text):
         if text.startswith('open-url '):
             url = text[9:]
             self.opened.append(url)
             self.url = url
-            self.with_page = True
+            if self.with_page:
+                self.extra[12] = url                  # Safari opens a new tab
+            else:
+                self.with_page = True
+                self.extra[1] = url
             self.frame(CONTROL_PEER, b'ok SpringBoard opens the address')
-            self.frame(1, {**LISTING, 'userInfo': {**LISTING['userInfo'], 'WIRListingKey': {'1': {
-                'WIRTitleKey': 'Opened', 'WIRTypeKey': 'WIRTypeWebPage', 'WIRURLKey': url, 'WIRPageIdentifierKey': 1}}}})
+            self.frame(1, self.listing())
         else:
             self.frame(CONTROL_PEER, b'error unknown command')
 
@@ -102,8 +114,10 @@ class FakeRelay:
     def _answer(self, peer, msg):
         name, info = msg['messageName'], msg.get('userInfo') or {}
         if name == 'WIRApplicationGetListingMessage':
-            self.frame(1, LISTING if self.with_page else {**LISTING, 'userInfo': {**LISTING['userInfo'], 'WIRListingKey': {}}})
+            self.frame(1, self.listing())
         elif name == 'WIRSocketSetupMessage':
+            if info['WIRPageIdentifierKey'] in self.refuse:
+                return
             self._raw(info, {'method': 'Target.targetCreated', 'params': {'targetInfo': {'targetId': 'page-7', 'type': 'page'}}})
         elif name == 'WIRSocketDataMessage':
             outer = json.loads(info['WIRSocketDataKey'])
@@ -185,6 +199,8 @@ class FakeRelay:
         """A touch on the screen: opens the keyboard when it lands on the field (the model says where the field is)."""
         if 0.60 < fx < 0.72 and 0.19 < fy < 0.22:
             self.keyboard, self.active = True, 'q'
+        elif self.keyboard and 0.88 < fx < 0.93 and 0.55 < fy < 0.57:      # the Done button above the keyboard
+            self.keyboard, self.active = False, None
 
 
 class FakeMonitor:

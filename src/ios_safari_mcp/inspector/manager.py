@@ -1,6 +1,7 @@
 """The one connection to the guest's relay that the tools share, and navigation on top of it."""
 import contextlib
 import json
+import os
 import re
 import time
 from urllib.parse import urlparse
@@ -31,7 +32,7 @@ def connection():
         return _inspector
     _inspector = None
     try:
-        insp = Inspector(config.WI_PORT, connect_timeout=15)
+        insp = Inspector(config.WI_PORT, connect_timeout=15, record=os.environ.get('IOS_SAFARI_MCP_RECORD'))
     except OSError as e:
         raise OSError(f'cannot reach the Web Inspector relay on 127.0.0.1:{config.WI_PORT} ({e}); is the VM running an image '
                       'built by `ios-safari-mcp build-image`, and has the guest finished booting?') from e
@@ -92,10 +93,12 @@ def navigate(url, timeout=60, page_args=None):
     expect = '' if target.startswith('about:') else (urlparse(target).hostname or '')
     insp = connection()
     index = None if (page_args or {}).get('page') is None else int(page_args['page'])
+    before = {(p['peer'], p['page']) for p in insp.pages()}
+    reason = None
     try:
         s = insp.session(index, wait=3)
-    except InspectorError:
-        s = None
+    except InspectorError as e:
+        s, reason = None, str(e)
     if s is not None:
         since = s.event_count
         s.send('Page.navigate', {'url': target})
@@ -105,9 +108,13 @@ def navigate(url, timeout=60, page_args=None):
         if nav is None:
             return f'asked {via} for {target}, but the page did not navigate within {min(timeout, 45)} s'
     else:
-        insp.open_url(target, timeout=30)
-        via = 'SpringBoard (there was no web page)'
-        s = insp.session(wait=max(10.0, timeout - (time.time() - t)))
+        # no web page, or one that does not attach (a page that was open when a snapshot was taken does not answer
+        # afterwards): SpringBoard opens the address, which makes a page that does
+        # the relay answers when SpringBoard has finished, and starting Safari in the slow guest takes a while
+        insp.open_url(target, timeout=max(90.0, timeout))
+        via = 'SpringBoard' + (f' ({reason})' if reason else ' (there was no web page)')
+        page = insp.wait_for_page(before, expect, min(90.0, max(20.0, timeout - (time.time() - t))))
+        s = insp.attach(page) if page else insp.session(wait=max(10.0, timeout - (time.time() - t)))
     state = wait_loaded(s, max(5.0, timeout - (time.time() - t)), expect)
     return f'opened {state.split(" ", 1)[1] if state and " " in str(state) else target} through {via} in {time.time() - t:.1f} s ({state})'
 

@@ -32,8 +32,10 @@ their state before assuming a fix is missing:
 - **Session length.** The guest gets `loader_return_after=SECONDS` and ends after that much guest time since boot. A saved state
   keeps the clock, so a snapshot saved at 1,796 s of a 2,400 s session had 600 s left after every restore. The default is 8 hours.
 - **Snapshots.** QEMU refuses to save a guest with a read-write `vvfat` disk or a `virtio-sound` device; the launch wrapper makes the
-  ESP read-only and drops the sound device when the VM is started saveable. Saving takes 70 to 98 s and 2.9 GB; restoring 28 s.
-  A snapshot is tied to the image it was saved from: rebuild the image and save a new one.
+  ESP read-only and drops the sound device when the VM is started saveable. Saving takes 70 to 112 s and 2.9 GB; restoring 18 to 28 s.
+  A snapshot is tied to the image it was saved from: rebuild the image and save a new one. **A web page that was open when a
+  snapshot was restored does not answer the inspector's setup any more** (its listing is replayed, the setup message gets no answer);
+  a page opened after the restore does. The tools open a fresh page through SpringBoard.
 - **The display turns itself off** after boot. `wake` is a tap and then the home key.
 - **A boot where touches are ignored.** In one boot in about ten, `backboardd` logs `still waiting for a main screen digitizer` and
   then `ignoring digitizer event for display <main> from unsupported service`: the virtual touchscreen came up classified as an

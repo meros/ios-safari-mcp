@@ -153,6 +153,18 @@ def test_status_reads_the_log():
     assert vm.status()['touchscreen'].startswith('not recognized')
 
 
+def test_a_restored_guest_is_running_not_starting(monkeypatch):
+    from ios_safari_mcp import qemu
+    write_log('')
+    Path(config.PIDFILE).write_text(f'{os.getpid()} 1000.0 safari-ready\n')
+    monkeypatch.setattr(qemu, 'alive', lambda: True)
+    monkeypatch.setattr(qemu, 'run_state', lambda: 'running')
+    st = vm.status()
+    assert st['phase'] == 'running' and st['restored_from'] == 'safari-ready'
+    Path(config.PIDFILE).write_text(f'{os.getpid()} 1000.0 \n')
+    assert vm.status()['phase'] == 'starting'
+
+
 def test_log_tail_filters_and_truncates():
     write_log('\n'.join(f'line {i}' for i in range(100)) + '\n' + 'x' * 500 + '\n')
     assert vm.log_tail(3).splitlines()[-2:] == ['line 99', 'x' * 300]

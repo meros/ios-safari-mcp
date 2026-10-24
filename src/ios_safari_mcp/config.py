@@ -5,6 +5,7 @@ HACKIOS_DIR            the hackios tree (default: ../hackios next to the checkou
 IOS_SAFARI_MCP_STATE   log, pid file, snapshots, screenshots (default: $XDG_STATE_HOME/ios-safari-mcp)
 QEMU_INSTANCE          run several VMs side by side: the monitor, QMP and relay ports shift by 10 per instance
 WI_PORT                host port that QEMU forwards to the guest's Web Inspector relay (default 27753 + 10 per instance)
+IOS_SAFARI_MCP_RECORD  a file: every frame received from the relay is appended to it as a line of JSON (for test fixtures)
 """
 import os
 

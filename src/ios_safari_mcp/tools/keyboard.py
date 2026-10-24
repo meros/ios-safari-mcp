@@ -17,6 +17,8 @@ from ..results import ToolError, json_result, text_result
 from .inspector import PAGE_PROP
 
 DEFAULT_FIELD = 'input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]),textarea'
+# the Done button of Safari's form accessory bar, as fractions of the screen (measured on a screenshot with the keyboard up)
+DONE_BUTTON = (0.909, 0.560)
 SELECTOR_PROPS = {'selector': {'type': 'string', 'description': 'CSS selector of the element'},
                   'index': {'type': 'integer', 'description': 'which match, default 0'}}
 
@@ -90,9 +92,9 @@ def keyboard_show(args):
 
 
 @tool('keyboard_hide', 'Close the keyboard and wait for the viewport to recover. method=blur (default) blurs the field, as '
-      'a page does; return taps the keyboard\'s bottom right key (it may submit a form); tap_outside taps a point of the page '
-      'outside the field (x and y in CSS px; default the left edge of the page).',
-      {'method': {'type': 'string', 'enum': ['blur', 'return', 'tap_outside']}, 'x': {'type': 'number'}, 'y': {'type': 'number'},
+      'a page does; done taps Safari\'s Done button above the keyboard (what a user presses); return taps the keyboard\'s bottom '
+      'right key (it may submit a form); tap_outside taps a point of the page outside the field (x and y in CSS px; default the left edge).',
+      {'method': {'type': 'string', 'enum': ['blur', 'done', 'return', 'tap_outside']}, 'x': {'type': 'number'}, 'y': {'type': 'number'},
        'timeout': {'type': 'number'}, **PAGE_PROP})
 def keyboard_hide(args):
     s = manager.session(args)
@@ -102,6 +104,10 @@ def keyboard_hide(args):
         return json_result({'already_hidden': True, **_summary(before)})
     if method == 'blur':
         manager.evaluate_json(s, page.BLUR)
+    elif method == 'done':
+        ok, out = qemu.touch('tap', DONE_BUTTON[0], DONE_BUTTON[1])     # the form accessory bar of Safari: ^ v Done
+        if not ok:
+            raise ToolError(out)
     elif method == 'return':
         ok, out = qemu.touch('tap', 0.9, 0.875)
         if not ok:
@@ -110,7 +116,7 @@ def keyboard_hide(args):
         vv = before['visualViewport']
         _tap_css(s, float(args.get('x', 2)), float(args.get('y', vv['offsetTop'] + vv['height'] / 2)))
     else:
-        raise ToolError('method: blur, return or tap_outside')
+        raise ToolError('method: blur, done, return or tap_outside')
     st, took = _wait_keyboard(s, False, float(args.get('timeout', 90)))
     if st['keyboardVisible']:
         raise ToolError(f'the keyboard is still up {took:.0f} s after {method}. {json.dumps(_summary(st))}')

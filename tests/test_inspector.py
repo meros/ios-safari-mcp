@@ -105,6 +105,20 @@ def test_navigate_without_a_page_asks_springboard(relay, monkeypatch):
     assert 'SpringBoard' in text(r) and 'example.com' in text(r)
 
 
+def test_a_page_that_will_not_attach_is_replaced_by_a_fresh_one(relay, monkeypatch):
+    from ios_safari_mcp.inspector import client
+    relay.refuse = {1}                                    # like a page that was open when a snapshot was restored
+    monkeypatch.setattr(client.Session, 'start', _short_start(client.Session.start))
+    r = tools.open_url({'url': 'https://example.com', 'timeout': 30})
+    assert relay.opened == ['https://example.com'] and 'SpringBoard' in text(r) and 'did not answer the setup' in text(r), text(r)
+    # the next call needs no second fallback: the refusing page is skipped and the newest page is used
+    assert 'through the inspector' in text(tools.open_url({'url': 'example.org', 'timeout': 30}))
+
+
+def _short_start(start):
+    return lambda self, timeout: start(self, 2)
+
+
 def test_full_url():
     f = manager.full_url
     assert f('example.com/a') == 'https://example.com/a'

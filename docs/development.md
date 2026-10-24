@@ -2,7 +2,7 @@
 
 ```sh
 nix develop                      # python, pytest, ruff, clang, lld, ldid
-pytest tests                     # 38 tests, no VM, about 25 s
+pytest tests                     # 42 tests, no VM, about 30 s
 ruff check .
 nix flake check                  # builds the package (and runs the tests in the sandbox), the relay, and lint
 bin/ios-safari-mcp doctor        # the setup, with the fix for each problem
@@ -36,9 +36,9 @@ def name(args):
   expressions, with a small model of the page (its address, a keyboard that a tap opens and `blur()` closes). `fakes.FakeMonitor`
   stands in for QEMU's monitor. `conftest.py` uses QEMU instance 9 (ports 4534, 4535, 27843) and a temporary state directory, so a
   test never touches a VM on the default ports.
-- **Fixtures** (`tests/fixtures/`): `handshake.json` holds two messages exactly as Safari sent them. To capture more, run a client
-  with `Inspector(port, record='frames.jsonl')` against a live VM and copy the file to `tests/fixtures/traffic.jsonl`; the decoder test
-  picks it up. Do not commit page content you do not own.
+- **Fixtures** (`tests/fixtures/`): `handshake.json` holds two messages exactly as Safari sent them. To capture more, start the
+  server with `IOS_SAFARI_MCP_RECORD=frames.jsonl` (or run a client with `Inspector(port, record='frames.jsonl')`) against a live VM and
+  copy the file to `tests/fixtures/traffic.jsonl`; the decoder test picks it up. Do not commit page content you do not own.
 - **Live** (`tests/live/`): `smoke.py [URL] [FIELD_SELECTOR]` runs the tools through one long-lived MCP session and prints a time per
   step; `call.py TOOL '{json}'` calls one tool.
 

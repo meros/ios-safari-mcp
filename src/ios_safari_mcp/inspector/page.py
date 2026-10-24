@@ -37,6 +37,8 @@ STATE = r"""function() {
             text: (e.innerText || e.placeholder || e.value || '').trim().replace(/\s+/g, ' ').slice(0, 40),
             top: Math.round(r.top), bottom: Math.round(r.bottom), position: cs.position};
   }
+  // a hairline or an empty strip is not a component the user needs: leave it out of the lists of fixed elements and popups
+  function substantial(x) { return x.text || x.bottom - x.top >= 24; }
   var a = document.activeElement;
   var editable = !!(a && a !== document.body && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
   var shown = [].slice.call(document.querySelectorAll(
@@ -46,12 +48,13 @@ STATE = r"""function() {
   var fixed = [].slice.call(document.querySelectorAll('body *')).filter(function(e) {
     var p = getComputedStyle(e).position, r = e.getBoundingClientRect();
     return (p === 'fixed' || p === 'sticky') && r.height > 0 && r.width > 0 && r.top < innerHeight && r.bottom > 0; }).map(function(e) {
-      var x = d(e); x.behindKeyboard = e.getBoundingClientRect().bottom > bottom && e.getBoundingClientRect().height < innerHeight * 0.6; return x; });
+      var x = d(e); x.behindKeyboard = e.getBoundingClientRect().bottom > bottom && e.getBoundingClientRect().height < innerHeight * 0.6; return x; }).filter(substantial);
   var popups = [].slice.call(document.querySelectorAll(
     '[role=listbox],[role=option],[role=menu],[class*=uggest],[class*=utocomplete],[class*=ropdown],[class*=opover],dialog[open]')).filter(function(e) {
       var r = e.getBoundingClientRect(), cs = getComputedStyle(e);
       return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && r.top < innerHeight && r.bottom > 0; }).map(function(e) {
       var x = d(e); x.behindKeyboard = e.getBoundingClientRect().bottom > bottom; return x; });
+  popups = popups.filter(substantial);
   return {
     keyboardVisible: innerHeight - vv.height * vv.scale > 120 && vv.scale <= 1.01,
     keyboardHeight: Math.max(0, Math.round(innerHeight - vv.height * vv.scale)),

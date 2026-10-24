@@ -115,6 +115,12 @@ def test_keyboard_hide_by_blur_recovers_the_viewport(phone):
     assert out['method'] == 'blur' and out['viewport_recovered'] is True and out['keyboardVisible'] is False
 
 
+def test_keyboard_hide_by_the_done_button(phone):
+    kb.keyboard_show({'selector': '#q'})
+    out = data(kb.keyboard_hide({'method': 'done'}))
+    assert out['method'] == 'done' and out['viewport_recovered'] is True
+
+
 def test_keyboard_hide_when_already_hidden(phone):
     assert data(kb.keyboard_hide({}))['already_hidden'] is True
 
@@ -122,7 +128,7 @@ def test_keyboard_hide_when_already_hidden(phone):
 def test_keyboard_hide_rejects_an_unknown_method(phone):
     kb.keyboard_show({'selector': '#q'})
     r = registry.call('keyboard_hide', {'method': 'shake'})
-    assert r['isError'] and 'blur, return or tap_outside' in text(r)
+    assert r['isError'] and 'blur, done, return or tap_outside' in text(r)
 
 
 def test_keyboard_events(phone):

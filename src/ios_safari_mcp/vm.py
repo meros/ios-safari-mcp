@@ -39,6 +39,15 @@ def launcher_pid():
         return None
 
 
+def restored_from():
+    """The snapshot this VM was started from, or None (a boot)."""
+    try:
+        parts = Path(config.PIDFILE).read_text().split()
+        return parts[2] if len(parts) > 2 else None
+    except OSError:
+        return None
+
+
 def started_at():
     try:
         return float(Path(config.PIDFILE).read_text().split()[1])
@@ -58,9 +67,12 @@ def status():
         'launcher_alive': launcher_pid() is not None,
         'panicked': bool(PANIC.search(text)),
         'touchscreen': 'not recognized: restart the VM (vm_stop, vm_start)' if TOUCH_BAD.search(text) else 'ok',
-        # the log of an earlier boot stays on disk: a phase counts only while QEMU runs
-        'phase': ('restoring' if state == 'inmigrate' else reached[-1] if alive and reached else
+        # the log of an earlier boot stays on disk: a phase counts only while QEMU runs; a restored guest repeats no boot lines
+        'phase': ('restoring' if state == 'inmigrate' else
+                  'running' if alive and state == 'running' and restored_from() and not reached else
+                  reached[-1] if alive and reached else
                   'starting' if alive or launcher_pid() is not None else 'stopped'),
+        'restored_from': restored_from() if alive else None,
         'seconds_since_start': round(time.time() - started) if started else None,
         'log': config.LOG,
     }
@@ -133,7 +145,7 @@ def start(seconds=28800, cpus=4, spinlock_timeout_us=60000000, snapshot=None, sa
         p = subprocess.Popen([launcher], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
                              start_new_session=True)
     with open(config.PIDFILE, 'w') as f:
-        f.write(f'{p.pid} {time.time()}\n')
+        f.write(f'{p.pid} {time.time()} {snapshot or ""}\n')
     if snapshot:
         return (f'Restoring snapshot {snapshot} (launcher pid {p.pid}). Use vm_status; the guest runs when the restore '
                 'has finished.')
